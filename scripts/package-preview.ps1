@@ -22,7 +22,7 @@ try {
     if (-not (Test-Path -LiteralPath $keystore)) {
         throw 'Existing development keystore not found. Refusing to create a different upgrade identity implicitly.'
     }
-    & .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:lintRelease :app:assembleDebug :app:assembleRelease --console=plain
+    & .\gradlew.bat :app:testUiTestUnitTest :app:lintDebug :app:lintRelease :app:assembleDebug :app:assembleRelease --console=plain
     if ($LASTEXITCODE -ne 0) { throw 'Android build or validation failed.' }
 
     $dist = Join-Path $root 'dist'

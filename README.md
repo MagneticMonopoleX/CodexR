@@ -140,7 +140,7 @@ Launch CodexR, grant its root request when prompted, and select either ChatGPT s
 The release build is non-debuggable and unsigned by default. Build it with:
 
 ```bash
-./gradlew testDebugUnitTest lintRelease assembleRelease
+./gradlew testUiTestUnitTest lintRelease assembleRelease
 ```
 
 On Windows, `scripts/package-preview.ps1` runs the checks, builds both variants, aligns the release APK, signs it with the existing local Android development key, verifies the result, and writes a SHA-256 checksum into the ignored `dist/` folder. It never uploads the key. Use a dedicated, securely backed-up signing key for production distribution; changing certificates affects upgrade compatibility.
@@ -150,6 +150,8 @@ On Windows, `scripts/package-preview.ps1` runs the checks, builds both variants,
 ```
 
 ## Chat controls
+
+- **Actions:** root commands, tool results, and screen captures are folded by default into compact summary rows. Tap the chevron or row to see the full selectable command/output and attachments. Adjacent matching calls/results share a single row; stopped, denied, and failed actions remain labeled while folded. Copy is available without expanding. Regular replies stay fully visible.
 
 - **Edit:** long-press one of your messages, or tap its pencil. Editing stops the current turn and replaces the conversation from that prompt onward after confirmation. Commands already executed are not undone.
 - **Copy:** select response text directly, or use the copy icon to copy the original Markdown, including LaTeX source.
@@ -186,7 +188,7 @@ If Android kills the process, CodexR records the interrupted turn on next launch
 Run unit tests:
 
 ```bash
-./gradlew testDebugUnitTest
+./gradlew testUiTestUnitTest
 ```
 
 Run Android lint:
@@ -198,10 +200,16 @@ Run Android lint:
 Build and verify the debug APK:
 
 ```bash
-./gradlew testDebugUnitTest assembleDebug lintDebug
+./gradlew testUiTestUnitTest assembleDebug lintDebug
 ```
 
-Instrumented tests require a connected Android device. Authentication-related instrumented tests may interact with app credential state, so use a test account or back up the app data first.
+Instrumented tests require a connected Android device. They now use a separate `com.example.codexmobile.uitest` application so the test runner's install/uninstall cleanup cannot erase the regular CodexR app's chats or credentials. Never change the test target back to the regular app package.
+
+```bash
+./gradlew connectedUiTestAndroidTest
+```
+
+The folded-action update adds seven grouping/status unit tests and two on-device UI tests for collapsed defaults and preserving expansion when results arrive.
 
 The feature update was verified with 29 local tests, three targeted device tests on a rooted Lenovo TB-J716F running Android 16, and live checks for Markdown/LaTeX selection, AI-requested screenshots, background completion, floating overlay controls, and queued follow-ups with the screen off. This does not establish compatibility with every device or root manager.
 

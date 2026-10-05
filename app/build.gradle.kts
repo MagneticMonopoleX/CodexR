@@ -20,11 +20,18 @@ android {
     }
 
     buildTypes {
+        create("uiTest") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".uitest"
+            matchingFallbacks += "debug"
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
+    // Connected tests install/uninstall their target app. Never target the user's CodexR package.
+    testBuildType = "uiTest"
     testOptions.unitTests.isIncludeAndroidResources = true
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -80,6 +87,7 @@ dependencies {
   // Instrumented tests
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
+  add("uiTestImplementation", libs.androidx.compose.ui.test.manifest)
 
   // Local tests: jUnit, coroutines, Android runner
   testImplementation(libs.junit)

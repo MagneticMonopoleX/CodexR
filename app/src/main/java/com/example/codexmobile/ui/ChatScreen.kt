@@ -12,6 +12,7 @@ import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -24,6 +25,8 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Screenshot
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.TextButton
@@ -93,8 +96,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.codexmobile.R
 import com.example.codexmobile.ShellAccessMode
@@ -120,6 +127,7 @@ fun ChatScreen(
     val sessions by viewModel.sessions.collectAsState()
     val activeSessionId by viewModel.activeSessionId.collectAsState()
     val messages by viewModel.messages.collectAsState()
+    val displayRows = remember(messages) { chatDisplayRows(messages) }
     val selectedModelId by viewModel.selectedModelId.collectAsState()
     val reasoningLevel by viewModel.reasoningLevel.collectAsState()
     val modelCatalog by viewModel.modelCatalog.collectAsState()
@@ -186,8 +194,8 @@ fun ChatScreen(
         dismissButton = { TextButton(onClick = { showCaptureConfirmation = false }) { Text("Cancel") } },
     )
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    LaunchedEffect(displayRows.size) {
+        if (displayRows.isNotEmpty()) listState.animateScrollToItem(displayRows.lastIndex)
     }
 
     if (showFullAccessConfirmation) {
@@ -337,11 +345,16 @@ fun ChatScreen(
                         modifier = Modifier.weight(1f).fillMaxWidth(),
                         contentPadding = PaddingValues(16.dp),
                     ) {
-                        items(messages, key = { it.id }) { message ->
-                            MessageBubble(message, onEdit = {
-                                if (isTyping) viewModel.stopExecution()
-                                editingMessage = message
-                            })
+                        items(displayRows, key = { it.id }) { row ->
+                            if (row.isAction) {
+                                ActionCard(row)
+                            } else {
+                                val message = row.messages.single()
+                                MessageBubble(message, onEdit = {
+                                    if (isTyping) viewModel.stopExecution()
+                                    editingMessage = message
+                                })
+                            }
                             Spacer(modifier = Modifier.height(8.dp))
                         }
                         if (isTyping) {
@@ -780,6 +793,46 @@ private fun CommandApprovalDialog(
             OutlinedButton(onClick = onDeny) { Text("Deny") }
         } },
     )
+}
+
+@Composable
+internal fun ActionCard(row: ChatDisplayRow) {
+    var expanded by rememberSaveable(row.id) { mutableStateOf(false) }
+    val context = LocalContext.current
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .testTag("action-header-${row.id}")
+                    .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
+                    .clickable(onClickLabel = if (expanded) "Collapse action" else "Expand action") { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = null)
+                Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp), style = MaterialTheme.typography.bodySmall)
+                Text(row.status, style = MaterialTheme.typography.labelSmall,
+                    color = if (row.needsAttention) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                IconButton(onClick = {
+                    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(
+                        ClipData.newPlainText("CodexR action", row.messages.joinToString("\n\n") { it.content }),
+                    )
+                }, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.ContentCopy, "Copy action", Modifier.size(16.dp)) }
+            }
+            if (expanded) Column(Modifier.testTag("action-details-${row.id}").padding(horizontal = 12.dp, vertical = 8.dp)) {
+                row.messages.forEachIndexed { index, message ->
+                    if (index > 0) HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                    MarkdownText(message.content, MaterialTheme.colorScheme.onSurfaceVariant, Modifier.fillMaxWidth())
+                    AttachmentStrip(message.attachments)
+                }
+            }
+        }
+    }
 }
 
 @Composable
