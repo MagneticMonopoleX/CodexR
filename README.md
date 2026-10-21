@@ -17,7 +17,7 @@ CodexR is an independent project. It is not an official OpenAI product and is no
 
 ## Download and quick start
 
-**Current preview: [v1.1.0-beta.1](https://github.com/YujieSang/CodexR/releases/tag/v1.1.0-beta.1)** · [Download APK](https://github.com/YujieSang/CodexR/releases/download/v1.1.0-beta.1/CodexR-v1.1.0-beta.1.apk) · [Release notes](docs/releases/v1.1.0-beta.1.md)
+**Current release: [v1.1.0](https://github.com/MagneticMonopoleX/CodexR/releases/tag/v1.1.0)** · [Download APK](https://github.com/MagneticMonopoleX/CodexR/releases/download/v1.1.0/CodexR-v1.1.0.apk) · [Release notes](docs/releases/v1.1.0.md)
 
 1. Download the APK from the release page and install it on a rooted Android 7.0+ device. Allow installation from your browser or file manager when Android asks.
 2. Open CodexR and sign in with ChatGPT or enter an OpenAI Platform API key.
@@ -25,7 +25,7 @@ CodexR is an independent project. It is not an official OpenAI product and is no
 4. Allow notifications for the background-work indicator and Stop action. For long screen-off tasks, open **Background execution / battery settings** in the sidebar and choose **Unrestricted** / **Don't optimize**.
 
 > [!IMPORTANT]
-> This is an experimental, non-debuggable preview APK signed with the maintainer's existing **development certificate**, not a dedicated production certificate. It can update earlier CodexR builds signed with that same certificate. A locally built APK usually has a different certificate and cannot update it in place. Do not uninstall just to resolve a signature mismatch: uninstalling removes local chats, attachments, and saved sign-in. The signing key is not included in this repository or the release.
+> This is a non-debuggable APK signed with the maintainer's existing **development certificate**, not a dedicated production certificate. It can update earlier CodexR builds signed with that same certificate. A locally built APK usually has a different certificate and cannot update it in place. Do not uninstall just to resolve a signature mismatch: uninstalling removes local chats, attachments, and saved sign-in. The signing key is not included in this repository or the release. The stable release label reflects personal testing, not validation on every device or root manager.
 
 The release includes `SHA256SUMS.txt` for download integrity checks. Android SDK and JDK are needed only to build from source, not to install the APK.
 
@@ -97,7 +97,7 @@ Full-access mode runs model-requested commands immediately as root. The setting 
 Clone the repository:
 
 ```bash
-git clone https://github.com/YujieSang/CodexR.git
+git clone https://github.com/MagneticMonopoleX/CodexR.git
 cd CodexR
 ```
 
@@ -121,10 +121,10 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## Install
 
-For the downloaded preview, with Android Debug Bridge connected to the device:
+For the downloaded release, with Android Debug Bridge connected to the device:
 
 ```bash
-adb install -r CodexR-v1.1.0-beta.1.apk
+adb install -r CodexR-v1.1.0.apk
 ```
 
 For a local debug build:
