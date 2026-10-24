@@ -28,6 +28,7 @@ data class CodexResponse(
     val text: String,
     val toolCalls: List<CodexToolCall> = emptyList(),
     val reasoningItems: List<String> = emptyList(),
+    val searches: List<String> = emptyList(),
 )
 
 @Serializable

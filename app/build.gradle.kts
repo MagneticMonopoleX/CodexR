@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.codexmobile"
         minSdk = 24
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.1.0"
+        versionCode = 5
+        versionName = "1.2.0-dev.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true

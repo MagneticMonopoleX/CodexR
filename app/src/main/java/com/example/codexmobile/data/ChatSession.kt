@@ -67,6 +67,7 @@ data class ChatSession(
     val queuedMessages: List<ChatMessage> = emptyList(),
     val turnInProgress: Boolean = false,
     val lastError: String? = null,
+    val webSearchEnabled: Boolean = false,
 ) {
     companion object {
         fun create(

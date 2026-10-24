@@ -81,6 +81,6 @@ class StreamingAndAttachmentsTest {
         assertEquals("data:image/jpeg;base64,AQID", content[1].jsonObject["image_url"]!!.jsonPrimitive.content)
         assertTrue(content[2].jsonObject["text"]!!.jsonPrimitive.content.contains("println(42)"))
         val tools = body["tools"]!!.jsonArray
-        assertTrue(tools.any { it.jsonObject["name"]!!.jsonPrimitive.content == "exec_command" })
+        assertTrue(tools.any { it.jsonObject["name"]?.jsonPrimitive?.content == "exec_command" })
     }
 }

@@ -16,6 +16,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.heightIn
@@ -127,7 +128,6 @@ fun ChatScreen(
     val sessions by viewModel.sessions.collectAsState()
     val activeSessionId by viewModel.activeSessionId.collectAsState()
     val messages by viewModel.messages.collectAsState()
-    val displayRows = remember(messages) { chatDisplayRows(messages) }
     val selectedModelId by viewModel.selectedModelId.collectAsState()
     val reasoningLevel by viewModel.reasoningLevel.collectAsState()
     val modelCatalog by viewModel.modelCatalog.collectAsState()
@@ -135,7 +135,10 @@ fun ChatScreen(
     val modelCatalogStatus by viewModel.modelCatalogStatus.collectAsState()
     val isReady by viewModel.isReady.collectAsState()
     val isTyping by viewModel.isTyping.collectAsState()
+    val displayRows = remember(messages, isTyping) { chatBubbles(messages, isTyping) }
     val pendingCommand by viewModel.pendingCommand.collectAsState()
+    val pendingQuestion by viewModel.pendingQuestion.collectAsState()
+    val webSearchEnabled by viewModel.webSearchEnabled.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val accessMode by viewModel.accessMode.collectAsState()
     val usage by viewModel.usage.collectAsState()
@@ -154,6 +157,9 @@ fun ChatScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    var showChatSearch by remember { mutableStateOf(false) }
+    var pendingJump by remember { mutableStateOf<ChatSearchHit?>(null) }
+    var revealedMessageId by remember { mutableStateOf<String?>(null) }
     var inputText by rememberSaveable(activeSessionId) { mutableStateOf("") }
     var denyReason by remember { mutableStateOf("") }
     var showFullAccessConfirmation by remember { mutableStateOf(false) }
@@ -194,8 +200,28 @@ fun ChatScreen(
         dismissButton = { TextButton(onClick = { showCaptureConfirmation = false }) { Text("Cancel") } },
     )
 
-    LaunchedEffect(displayRows.size) {
-        if (displayRows.isNotEmpty()) listState.animateScrollToItem(displayRows.lastIndex)
+    LaunchedEffect(messages.size, activeSessionId) {
+        if (displayRows.isNotEmpty() && pendingJump == null) listState.animateScrollToItem(displayRows.size)
+    }
+    LaunchedEffect(pendingJump, displayRows) {
+        val hit = pendingJump ?: return@LaunchedEffect
+        if (activeSessionId != hit.sessionId) return@LaunchedEffect
+        val index = displayRows.indexOfFirst { row -> row.messages.any { it.id == hit.messageId } }
+        if (index >= 0) {
+            listState.scrollToItem(index)
+            revealedMessageId = hit.messageId
+            pendingJump = null
+        }
+    }
+    if (showChatSearch) ChatSearchDialog(sessions, isReady && !isTyping,
+        onOpen = { hit ->
+            pendingJump = hit.takeIf { it.messageId != null }
+            viewModel.selectSession(hit.sessionId)
+            showChatSearch = false
+            coroutineScope.launch { drawerState.close() }
+        }, onDismiss = { showChatSearch = false })
+    pendingQuestion?.let { question ->
+        AgentQuestionDialog(question, onAnswer = { viewModel.answerQuestion(it) }, onSkip = { viewModel.skipQuestion() })
     }
 
     if (showFullAccessConfirmation) {
@@ -229,10 +255,13 @@ fun ChatScreen(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = pendingCommand == null,
+        gesturesEnabled = pendingCommand == null && pendingQuestion == null,
         drawerContent = {
             SessionDrawer(
                 sessions = sessions,
+                onSearch = { showChatSearch = true },
+                webSearchEnabled = webSearchEnabled,
+                onWebSearchChange = viewModel::setWebSearchEnabled,
                 activeSessionId = activeSessionId,
                 modelCatalog = modelCatalog,
                 accessMode = accessMode,
@@ -346,30 +375,21 @@ fun ChatScreen(
                         contentPadding = PaddingValues(16.dp),
                     ) {
                         items(displayRows, key = { it.id }) { row ->
-                            if (row.isAction) {
-                                ActionCard(row)
-                            } else {
+                            if (row.isUser) {
                                 val message = row.messages.single()
                                 MessageBubble(message, onEdit = {
                                     if (isTyping) viewModel.stopExecution()
                                     editingMessage = message
                                 })
+                            } else {
+                                val active = isTyping && row.id == displayRows.lastOrNull()?.id
+                                ResponseBubble(row, revealedMessageId,
+                                    streamingText = if (active) streamingText else "",
+                                    phase = if (active) phase.ifBlank { "CodexR is processing…" } else "")
                             }
                             Spacer(modifier = Modifier.height(8.dp))
                         }
-                        if (isTyping) {
-                            item {
-                                if (streamingText.isNotBlank()) {
-                                    MarkdownText(streamingText, MaterialTheme.colorScheme.onSurface, Modifier.fillMaxWidth().padding(12.dp))
-                                }
-                                Text(
-                                    text = phase.ifBlank { "CodexR is processing…" },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(start = 8.dp),
-                                )
-                            }
-                        }
+                        item(key = "chat-bottom") { Spacer(Modifier.height(1.dp)) }
                     }
                 }
 
@@ -422,7 +442,12 @@ fun ChatScreen(
                     if (isTyping || attachmentStatus != null) IconButton(onClick = { viewModel.stopExecution() }) {
                         Icon(Icons.Default.Stop, "Stop execution", tint = MaterialTheme.colorScheme.error)
                     }
-                    IconButton(
+                    val canContinue = !isTyping && canRetry && inputText.isBlank() && draftAttachments.isEmpty()
+                    if (canContinue) TextButton(
+                        onClick = { viewModel.continueResponse() },
+                        enabled = isReady && attachmentStatus == null,
+                    ) { Text("Continue") }
+                    else IconButton(
                         onClick = {
                             if (viewModel.sendMessage(inputText)) {
                                 inputText = ""
@@ -441,6 +466,9 @@ fun ChatScreen(
 @Composable
 private fun SessionDrawer(
     sessions: List<ChatSession>,
+    onSearch: () -> Unit,
+    webSearchEnabled: Boolean,
+    onWebSearchChange: (Boolean) -> Unit,
     activeSessionId: String?,
     modelCatalog: List<CodexModelOption>,
     accessMode: ShellAccessMode,
@@ -462,6 +490,7 @@ private fun SessionDrawer(
 ) {
     val context = LocalContext.current
     var showBatteryHelp by remember { mutableStateOf(false) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
     if (showBatteryHelp) AlertDialog(
         onDismissRequest = { showBatteryHelp = false },
         title = { Text("Background execution") },
@@ -500,6 +529,21 @@ private fun SessionDrawer(
             Icon(Icons.Default.Add, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
             Text("New chat")
+        }
+        OutlinedButton(onClick = onSearch, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            Text("Search chats")
+        }
+        TextButton(onClick = { showSettings = !showSettings }, modifier = Modifier.padding(horizontal = 16.dp)) {
+            Text(if (showSettings) "Hide settings" else "Settings & web search")
+        }
+        if (showSettings) Column(Modifier.fillMaxWidth().heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Web search", style = MaterialTheme.typography.titleSmall)
+                Text("For this chat. Queries go to the provider; API charges may apply. Availability depends on the model/account.",
+                    style = MaterialTheme.typography.bodySmall)
+            }
+            Switch(checked = webSearchEnabled, onCheckedChange = onWebSearchChange, enabled = enabled)
         }
         Row(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -582,6 +626,7 @@ private fun SessionDrawer(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 )
             }
+        }
         }
         HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
         Text(
@@ -796,8 +841,58 @@ private fun CommandApprovalDialog(
 }
 
 @Composable
-internal fun ActionCard(row: ChatDisplayRow) {
+internal fun ResponseBubble(
+    bubble: ChatBubble,
+    revealMessageId: String? = null,
+    streamingText: String = "",
+    phase: String = "",
+) {
+    val context = LocalContext.current
+    val textColor = MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(Modifier.fillMaxWidth().testTag("response-${bubble.id}"),
+        shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("CodexR", color = textColor, style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.weight(1f))
+                IconButton(onClick = {
+                    val text = (bubble.messages.map { it.content } + streamingText).filter { it.isNotBlank() }.joinToString("\n\n")
+                    context.getSystemService(ClipboardManager::class.java)
+                        .setPrimaryClip(ClipData.newPlainText("CodexR response", text))
+                }, modifier = Modifier.size(32.dp)) { Icon(Icons.Default.ContentCopy, "Copy response", Modifier.size(16.dp)) }
+            }
+            bubble.rows.forEach { row ->
+                androidx.compose.runtime.key(row.id) {
+                    val bringIntoView = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+                    LaunchedEffect(revealMessageId) {
+                        if (revealMessageId != null && row.messages.any { it.id == revealMessageId }) {
+                            androidx.compose.runtime.withFrameNanos { }
+                            bringIntoView.bringIntoView()
+                        }
+                    }
+                    Column(Modifier.bringIntoViewRequester(bringIntoView)) {
+                        if (row.isAction) ActionCard(row, revealMessageId)
+                        else row.messages.forEach { message ->
+                            if (message.interrupted) Text("Incomplete response", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error)
+                            MarkdownText(message.content, textColor, Modifier.fillMaxWidth())
+                            AttachmentStrip(message.attachments)
+                        }
+                    }
+                }
+            }
+            if (streamingText.isNotBlank()) MarkdownText(streamingText, textColor, Modifier.fillMaxWidth())
+            if (phase.isNotBlank()) Text(phase, color = textColor, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+internal fun ActionCard(row: ChatDisplayRow, revealMessageId: String? = null) {
     var expanded by rememberSaveable(row.id) { mutableStateOf(false) }
+    LaunchedEffect(revealMessageId) {
+        if (revealMessageId != null && row.messages.any { it.id == revealMessageId }) expanded = true
+    }
     val context = LocalContext.current
     Surface(
         modifier = Modifier.fillMaxWidth(),

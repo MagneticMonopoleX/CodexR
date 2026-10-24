@@ -6,16 +6,49 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+/** Presentation-only grouping: tool outputs keep their protocol roles in storage. */
+data class ChatBubble(val id: String, val rows: List<ChatDisplayRow>, val isUser: Boolean) {
+    val messages: List<ChatMessage> get() = rows.flatMap { it.messages }
+}
+
+fun chatBubbles(messages: List<ChatMessage>, processing: Boolean = false): List<ChatBubble> {
+    val bubbles = mutableListOf<ChatBubble>()
+    var responseId = "response-start"
+    chatDisplayRows(messages).forEach { row ->
+        val user = !row.isAction && row.messages.first().role == "user"
+        if (user) {
+            bubbles += ChatBubble(row.id, listOf(row), true)
+            responseId = "response-${row.id}"
+        } else if (bubbles.lastOrNull()?.isUser == false) {
+            val previous = bubbles.removeAt(bubbles.lastIndex)
+            bubbles += previous.copy(rows = previous.rows + row)
+        } else {
+            bubbles += ChatBubble(responseId, listOf(row), false)
+        }
+    }
+    if (processing && (bubbles.isEmpty() || bubbles.last().isUser)) {
+        bubbles += ChatBubble(responseId, emptyList(), false)
+    }
+    return bubbles
+}
+
 data class ChatDisplayRow(val messages: List<ChatMessage>, val isAction: Boolean) {
     val id: String get() = messages.first().id
     val title: String get() {
         val call = messages.first()
+        if (call.toolName == "ask_user") return "Question for you"
+        if (call.kind == "web_search") return "Web search"
         if (call.toolName == "capture_screen" || call.kind.startsWith("capture_")) return "Screen capture"
         val command = shellCommand(call)
         return command?.lineSequence()?.firstOrNull { it.isNotBlank() }?.trim()?.take(90)
             ?: call.toolName ?: "Command / action"
     }
     val status: String get() {
+        if (messages.first().kind == "web_search") return when {
+            messages.first().content.startsWith("Web search failed:") -> "Failed"
+            messages.first().content.startsWith("Web search completed:") -> "Completed"
+            else -> "Result"
+        }
         val result = messages.lastOrNull { it.kind in resultKinds }
         if (result == null) return "Requested"
         val firstLine = result.content.lineSequence().firstOrNull().orEmpty()
@@ -72,7 +105,7 @@ fun chatDisplayRows(messages: List<ChatMessage>): List<ChatDisplayRow> {
             rows += ChatDisplayRow(listOf(current, next), true)
             index += 2
         } else {
-            rows += ChatDisplayRow(listOf(current), current.kind in callKinds || current.kind in resultKinds)
+            rows += ChatDisplayRow(listOf(current), current.kind in callKinds || current.kind in resultKinds || current.kind == "web_search")
             index++
         }
     }

@@ -40,7 +40,12 @@ class ConversationBehaviorTest {
         Unit
     }
 
-    @After fun teardown() { controller.close(); Dispatchers.resetMain() }
+    @After fun teardown() = runBlocking {
+        if (::controller.isInitialized) {
+            controller.close()?.join()
+        }
+        Dispatchers.resetMain()
+    }
 
     @Test fun `queued followup goes after tool output and before next request`() = runBlocking {
         val rootGate = CompletableDeferred<ShellCommandResult>()
@@ -157,17 +162,105 @@ class ConversationBehaviorTest {
         assertEquals(listOf("First", "First answer", "Second", "Second answer"), controller.messages.value.map { it.content })
     }
 
+    @Test fun `question waits for explicit answer even in full access and resumes with paired result`() {
+        controller.setFullAccessEnabled(true)
+        runtime.replies += CodexResponse("", listOf(CodexToolCall("q1", "ask_user",
+            """{"question":"Which device?","options":["Tablet","Phone"]}""")))
+        runtime.replies += CodexResponse("Using your custom device")
+        controller.sendMessage("Set up a device")
+        assertTrue(controller.isTyping.value)
+        assertEquals(listOf("Tablet", "Phone"), controller.pendingQuestion.value!!.options)
+        assertNull(controller.pendingCommand.value)
+        assertEquals(1, runtime.requests.size)
+        assertEquals(0, runtime.executions)
+        assertTrue(controller.answerQuestion("My own device"))
+        assertNull(controller.pendingQuestion.value)
+        assertFalse(controller.isTyping.value)
+        val answer = runtime.requests.last().single { it.kind == "tool_result" }
+        assertEquals("q1", answer.toolCallId)
+        assertEquals("User answer: My own device", answer.content)
+        assertFalse(controller.answerQuestion("Duplicate"))
+    }
+
+    @Test fun `stopping a question cancels its gate and never invents an answer`() {
+        runtime.replies += CodexResponse("", listOf(CodexToolCall("q1", "ask_user",
+            """{"question":"Continue?","options":["Yes","No"]}""")))
+        controller.sendMessage("Help")
+        controller.stopExecution()
+        assertNull(controller.pendingQuestion.value)
+        assertFalse(controller.answerQuestion("Yes"))
+        assertEquals(1, runtime.requests.size)
+        assertTrue(controller.canRetry.value)
+        assertTrue(controller.messages.value.last().content.contains("without answering"))
+        assertEquals(0, runtime.executions)
+    }
+
+    @Test fun `skip returns an explicit non-answer and continues without root consent`() {
+        runtime.replies += CodexResponse("", listOf(CodexToolCall("q1", "ask_user",
+            """{"question":"Which device?","options":["Tablet","Phone"]}""")))
+        runtime.replies += CodexResponse("Continuing without that detail")
+        controller.sendMessage("Help")
+        assertTrue(controller.skipQuestion())
+        assertNull(controller.pendingQuestion.value)
+        assertFalse(controller.isTyping.value)
+        assertFalse(controller.canRetry.value)
+        val result = runtime.requests.last().single { it.kind == "tool_result" }
+        assertEquals("q1", result.toolCallId)
+        assertTrue(result.content.contains("User skipped"))
+        assertTrue(result.content.contains("No answer or permission"))
+        assertFalse(controller.skipQuestion())
+        assertEquals(0, runtime.executions)
+    }
+
+    @Test fun `continue adds explicit resume instruction and keeps interrupted tool context`() {
+        assertFalse(controller.continueResponse())
+        runtime.replies += CodexResponse("", listOf(CodexToolCall("call_1", "exec_command", "{\"cmd\":\"echo hello\"}")))
+        controller.sendMessage("Help")
+        assertFalse(controller.continueResponse())
+        controller.stopExecution()
+        runtime.replies += CodexResponse("Resumed")
+        assertTrue(controller.continueResponse())
+        val request = runtime.requests.last()
+        assertTrue(request.last().content.startsWith("Continue where you left off."))
+        assertTrue(request.any { it.kind == "tool_result" && it.toolCallId == "call_1" })
+        assertEquals(0, runtime.executions)
+        assertFalse(controller.continueResponse())
+    }
+
+    @Test fun `web search preference is per chat and passed to runtime`() {
+        controller.setWebSearchEnabled(true)
+        val firstChat = controller.activeSessionId.value!!
+        runtime.replies += CodexResponse("Searched", searches = listOf("Web search completed: docs"))
+        controller.sendMessage("Find docs")
+        assertTrue(runtime.webSearchFlags.last())
+        assertEquals("web_search", controller.messages.value[1].kind)
+        controller.createSession()
+        assertFalse(controller.webSearchEnabled.value)
+        controller.selectSession(firstChat)
+        assertTrue(controller.webSearchEnabled.value)
+    }
+
+    @Test fun `shell examples in normal answers never execute as root`() {
+        controller.setFullAccessEnabled(true)
+        runtime.replies += CodexResponse("Example only:\n```bash\nreboot\n```")
+        controller.sendMessage("Show an example")
+        assertEquals(0, runtime.executions)
+        assertFalse(controller.isTyping.value)
+    }
+
     private class FakeRuntime : ChatRuntime {
         val replies = ArrayDeque<CodexResponse>()
         val requests = mutableListOf<List<ChatMessage>>()
+        val webSearchFlags = mutableListOf<Boolean>()
         var executions = 0
         var captures = 0
         var failure: Exception? = null
         var responseGate: CompletableDeferred<CodexResponse>? = null
         var root: suspend () -> ShellCommandResult = { ShellCommandResult(0, "ok", "") }
         override suspend fun respond(messages: List<ChatMessage>, modelId: String, reasoningLevel: ReasoningLevel,
-            onPartial: (String) -> Unit): CodexResponse {
+            webSearchEnabled: Boolean, onPartial: (String) -> Unit): CodexResponse {
             requests += messages
+            webSearchFlags += webSearchEnabled
             failure?.let { throw it }
             return responseGate?.await() ?: replies.removeFirst()
         }

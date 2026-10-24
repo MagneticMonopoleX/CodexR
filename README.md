@@ -149,13 +149,23 @@ On Windows, `scripts/package-preview.ps1` runs the checks, builds both variants,
 ./scripts/package-preview.ps1
 ```
 
+## Upcoming: questions and search
+
+These source changes are not included in the published v1.1.0 APK yet.
+
+- **Questions:** the agent can pause with a structured question, selectable choices, and a **Specify your own** text field. Tap **Answer** to submit or **Skip** to continue without answering. The floating background overlay also supports choices, custom answers, and Skip; its separate Stop button cancels execution. Full-access mode never answers a question for you, and answering or skipping does not grant root approval.
+- **Search chats:** use **Search chats** in the sidebar to search saved titles, messages, and command output locally. Select a result to open the chat at the matching message, expanding a folded action when needed. Hidden reasoning is excluded. Stop an active response before navigating to a search result.
+- **Web search:** enable it for the current chat under **Settings & web search** in the sidebar. It is off by default, sends search queries to the model provider, and may incur additional API charges. Supported backends return folded search activity and clickable inline citations/source links. Availability depends on the selected model and account; if the backend rejects search, switch it off and retry. There is no scraping fallback or extra search-service API key. ChatGPT-backend availability is not guaranteed by the public API documentation.
+- **Shell examples:** only structured `exec_command` calls request execution. Shell code fences in explanations or web results are never automatically executed.
+
 ## Chat controls
 
-- **Actions:** root commands, tool results, and screen captures are folded by default into compact summary rows. Tap the chevron or row to see the full selectable command/output and attachments. Adjacent matching calls/results share a single row; stopped, denied, and failed actions remain labeled while folded. Copy is available without expanding. Regular replies stay fully visible.
+- **Responses and actions:** each response combines commentary, commands, search activity, screen captures, and the final answer in one bubble. Commands and their output are folded by default into compact summary rows inside that bubble. Tap a row to expand or collapse its selectable details. Stopped, denied, and failed actions remain labeled while folded. Copy an individual action without expanding it, or copy the entire response with its top-right copy button. Regular replies stay fully visible; each user follow-up starts a new response bubble.
 
 - **Edit:** long-press one of your messages, or tap its pencil. Editing stops the current turn and replaces the conversation from that prompt onward after confirmation. Commands already executed are not undone.
 - **Copy:** select response text directly, or use the copy icon to copy the original Markdown, including LaTeX source.
 - **Stop:** the square button cancels the network request and signals the active root process group. The work notification also has a Stop action. You can then edit the last prompt or retry.
+- **Continue:** after a stopped or failed response, an empty composer shows **Continue** in place of Send. It asks the agent to resume from saved context and inspect interrupted work before retrying. Typing a message or adding an attachment switches back to Send.
 - **Retry:** after an error or interruption, Retry response continues from the saved conversation. It does not directly replay completed commands; the model may request additional commands under the selected approval policy.
 - **Follow-up:** type and send while CodexR is processing. The message is queued until the next tool result, or the end of the current response if no tool is used. Queued messages can be edited or removed. They remain queued if you stop or encounter an error.
 

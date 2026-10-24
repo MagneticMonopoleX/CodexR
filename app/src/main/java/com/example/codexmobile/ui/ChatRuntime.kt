@@ -15,7 +15,7 @@ import com.example.codexmobile.data.ReasoningLevel
 /** The side effects of a turn, separated so conversation transitions can be tested offline. */
 interface ChatRuntime {
     suspend fun respond(messages: List<ChatMessage>, modelId: String, reasoningLevel: ReasoningLevel,
-        onPartial: (String) -> Unit): CodexResponse
+        webSearchEnabled: Boolean, onPartial: (String) -> Unit): CodexResponse
     suspend fun execute(command: String): ShellCommandResult
     suspend fun capture(): List<MessageAttachment>
     suspend fun models(): List<CodexModelOption>
@@ -25,8 +25,8 @@ interface ChatRuntime {
 
 class AndroidChatRuntime(private val application: Application) : ChatRuntime {
     override suspend fun respond(messages: List<ChatMessage>, modelId: String, reasoningLevel: ReasoningLevel,
-        onPartial: (String) -> Unit) =
-        AIClient.generateResponse(messages, modelId, reasoningLevel, onPartial)
+        webSearchEnabled: Boolean, onPartial: (String) -> Unit) =
+        AIClient.generateResponse(messages, modelId, reasoningLevel, onPartial, webSearchEnabled)
     override suspend fun execute(command: String) = ShellManager.executeRootCommand(command)
     override suspend fun capture() = ScreenCapture.capture(application)
     override suspend fun models() = AIClient.fetchModelCatalog()

@@ -5,6 +5,34 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ChatDisplayRowsTest {
+    @Test fun `one response bubble contains commentary actions and final answer`() {
+        val messages = listOf(ChatMessage("user", "Inspect"), ChatMessage("assistant", "Checking"),
+            call(), result(), ChatMessage("assistant", "Done"))
+        val bubbles = chatBubbles(messages)
+        assertEquals(2, bubbles.size)
+        assertTrue(bubbles.first().isUser)
+        assertEquals(listOf(false, true, false), bubbles.last().rows.map { it.isAction })
+        assertEquals(messages.drop(1), bubbles.last().messages)
+    }
+
+    @Test fun `streaming bubble retains identity through tools and completion`() {
+        val prompt = ChatMessage("user", "Inspect")
+        val pending = chatBubbles(listOf(prompt), processing = true).last()
+        val complete = chatBubbles(listOf(prompt, call(), result(), ChatMessage("assistant", "Done"))).last()
+        assertEquals(pending.id, complete.id)
+        assertTrue(pending.rows.isEmpty())
+        assertFalse(complete.isUser)
+    }
+
+    @Test fun `followup splits bubbles but tool output does not become a human bubble`() {
+        val prompt = ChatMessage("user", "Inspect")
+        val followup = ChatMessage("user", "Wait")
+        val bubbles = chatBubbles(listOf(prompt, call(), result(), followup, ChatMessage("assistant", "Stopped")))
+        assertEquals(listOf(true, false, true, false), bubbles.map { it.isUser })
+        assertNotEquals(bubbles[1].id, bubbles[3].id)
+        assertEquals(2, bubbles[1].messages.size)
+    }
+
     private fun call(id: String = "call1") = ChatMessage("assistant", "Command", kind = "tool_call",
         toolCallId = id, toolName = "exec_command", toolArguments = "{\"cmd\":\"ls -la\\npwd\"}")
     private fun result(id: String = "call1", content: String = "Command execution result:\nexit_code: 0\nstdout:\nhello") =

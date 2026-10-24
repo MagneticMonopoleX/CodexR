@@ -38,4 +38,19 @@ class ActionCardTest {
         }
         compose.onNodeWithTag("action-details-action").assertExists()
     }
+
+    @Test fun combinedResponseKeepsActionsFoldedAndSearchCanRevealThem() {
+        val reveal = mutableStateOf<String?>(null)
+        val result = ChatMessage("user", "exit_code: 0", id = "result", kind = "tool_result", toolCallId = "call")
+        val bubble = chatBubbles(listOf(ChatMessage("assistant", "Checking"), call, result,
+            ChatMessage("assistant", "Done"))).single()
+        compose.setContent { MaterialTheme { ResponseBubble(bubble, reveal.value) } }
+        compose.onNodeWithTag("response-${bubble.id}").assertExists()
+        compose.onNodeWithContentDescription("Copy response").assertExists()
+        compose.onNodeWithTag("action-details-action").assertDoesNotExist()
+        compose.runOnIdle { reveal.value = "result" }
+        compose.onNodeWithTag("action-details-action").assertExists()
+        compose.onNodeWithTag("action-header-action").performClick()
+        compose.onNodeWithTag("action-details-action").assertDoesNotExist()
+    }
 }

@@ -57,15 +57,16 @@ object AIClient {
         modelId: String = DEFAULT_CODEX_MODEL_ID,
         reasoningLevel: ReasoningLevel = ReasoningLevel.MEDIUM,
         onPartial: (String) -> Unit = {},
+        webSearchEnabled: Boolean = false,
     ): CodexResponse {
         val context = applicationContext ?: error("AIClient is not initialized")
         var credential = AuthManager.credential(context)
         return try {
-            sendRequest(credential, messages, modelId, reasoningLevel, onPartial)
+            sendRequest(credential, messages, modelId, reasoningLevel, onPartial, webSearchEnabled)
         } catch (failure: CodexHttpException) {
             if (failure.statusCode != 401 || credential is AuthCredential.ApiKey) throw failure
             credential = AuthManager.credential(context, forceRefresh = true)
-            sendRequest(credential, messages, modelId, reasoningLevel, onPartial)
+            sendRequest(credential, messages, modelId, reasoningLevel, onPartial, webSearchEnabled)
         }
     }
 
@@ -240,10 +241,11 @@ object AIClient {
         modelId: String,
         reasoningLevel: ReasoningLevel,
         onPartial: (String) -> Unit,
+        webSearchEnabled: Boolean,
     ): CodexResponse =
         withContext(Dispatchers.IO) {
             val requestId = UUID.randomUUID().toString()
-            val body = buildRequestBody(messages, modelId, reasoningLevel).toString()
+            val body = buildRequestBody(messages, modelId, reasoningLevel, webSearchEnabled).toString()
                 .toRequestBody("application/json".toMediaType())
             val requestBuilder = Request.Builder()
                 .url(if (credential is AuthCredential.ChatGpt) CODEX_RESPONSES_URL else API_RESPONSES_URL)
@@ -258,7 +260,10 @@ object AIClient {
             client.newCall(requestBuilder.build()).consumeCancellable { response ->
                 if (!response.isSuccessful) {
                     val errorBody = response.body?.string().orEmpty()
-                    throw CodexHttpException(response.code, extractError(errorBody))
+                    val detail = extractError(errorBody)
+                    throw CodexHttpException(response.code, if (webSearchEnabled && response.code == 400)
+                        "$detail\nIf this model or account does not support web search, turn off Web search in the sidebar and retry."
+                        else detail)
                 }
                 val responseBody = response.body
                     ?: throw CodexProtocolException("Codex returned an empty response")
@@ -289,6 +294,7 @@ object AIClient {
         messages: List<ChatMessage>,
         modelId: String = DEFAULT_CODEX_MODEL_ID,
         reasoningLevel: ReasoningLevel = ReasoningLevel.MEDIUM,
+        webSearchEnabled: Boolean = false,
     ): JsonObject {
         val attachmentBytes = messages.sumOf { message -> message.attachments.sumOf { File(it.localPath).length() } }
         require(attachmentBytes <= 24L * 1024 * 1024) {
@@ -299,6 +305,7 @@ object AIClient {
         val input = buildJsonArray {
             messages.asSequence()
                 .filter { it.role == "user" || it.role == "assistant" }
+                .filterNot { it.kind == "web_search" }
                 .forEach { message ->
                     if (message.kind == "reasoning") {
                         val item = json.parseToJsonElement(message.content).jsonObject
@@ -370,6 +377,26 @@ object AIClient {
             put("input", input)
             put("parallel_tool_calls", false)
             put("tools", buildJsonArray {
+                if (webSearchEnabled) add(buildJsonObject { put("type", "web_search") })
+                add(buildJsonObject {
+                    put("type", "function")
+                    put("name", "ask_user")
+                    put("description", "Ask the user one clarification question and wait for their answer before continuing. Use for missing requirements or user choices, including in full-access mode. An answer never grants root permission; root approval is handled separately. The user can choose an option or enter their own answer.")
+                    put("strict", true)
+                    put("parameters", buildJsonObject {
+                        put("type", "object")
+                        put("properties", buildJsonObject {
+                            put("question", buildJsonObject { put("type", "string") })
+                            put("options", buildJsonObject {
+                                put("type", "array")
+                                put("items", buildJsonObject { put("type", "string") })
+                                put("description", "Zero to five distinct suggested answers; use an empty array for free text only.")
+                            })
+                        })
+                        put("required", buildJsonArray { add(JsonPrimitive("question")); add(JsonPrimitive("options")) })
+                        put("additionalProperties", false)
+                    })
+                })
                 add(buildJsonObject {
                     put("type", "function")
                     put("name", "exec_command")
@@ -418,13 +445,16 @@ object AIClient {
         var completed = false
         val toolCalls = linkedMapOf<String, CodexToolCall>()
         val reasoningItems = linkedMapOf<String, String>()
+        val searches = linkedMapOf<String, String>()
+        val citations = linkedMapOf<String, String>()
+        val inlineCitations = mutableListOf<InlineSearchCitation>()
 
         fun consumeItem(item: JsonObject) {
             when (item["type"]?.jsonPrimitive?.contentOrNull) {
                 "function_call" -> {
                     val name = item["name"]?.jsonPrimitive?.contentOrNull
                         ?: throw CodexProtocolException("Tool request has no name")
-                    if (name !in setOf("exec_command", "capture_screen"))
+                    if (name !in setOf("exec_command", "capture_screen", "ask_user"))
                         throw CodexProtocolException("Unsupported tool requested: $name")
                     val arguments = item["arguments"]?.jsonPrimitive?.contentOrNull ?: "{}"
                     val parsed = runCatching { json.parseToJsonElement(arguments).jsonObject }
@@ -433,11 +463,38 @@ object AIClient {
                         throw CodexProtocolException("Screen capture received unexpected arguments")
                     if (name == "exec_command" && parsed["cmd"]?.jsonPrimitive?.contentOrNull.isNullOrBlank())
                         throw CodexProtocolException("Shell command is empty")
+                    if (name == "ask_user") AgentQuestion.parse("validation", arguments)
                     val callId = item["call_id"]?.jsonPrimitive?.contentOrNull
                         ?: throw CodexProtocolException("Tool request has no call ID")
                     toolCalls[callId] = CodexToolCall(callId, name, arguments)
                 }
                 "reasoning" -> item["id"]?.jsonPrimitive?.contentOrNull?.let { reasoningItems[it] = item.toString() }
+                "web_search_call" -> {
+                    val id = item["id"]?.jsonPrimitive?.contentOrNull ?: return
+                    val action = item["action"] as? JsonObject
+                    val queries = (action?.get("queries") as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                        ?: listOfNotNull(action?.get("query")?.jsonPrimitive?.contentOrNull)
+                    searches[id] = "Web search ${item["status"]?.jsonPrimitive?.contentOrNull ?: "completed"}: " +
+                        queries.joinToString("; ").ifBlank { action?.get("type")?.jsonPrimitive?.contentOrNull ?: "search" }
+                }
+                "message" -> (item["content"] as? JsonArray).orEmpty().forEach { part ->
+                    val content = part as? JsonObject ?: return@forEach
+                    (content["annotations"] as? JsonArray).orEmpty().forEach annotationLoop@ { entry ->
+                        val annotation = entry as? JsonObject ?: return@annotationLoop
+                        if (annotation["type"]?.jsonPrimitive?.contentOrNull == "url_citation") {
+                            val url = annotation["url"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                            if (url.startsWith("https://") || url.startsWith("http://")) {
+                                citations[url] = annotation["title"]?.jsonPrimitive?.contentOrNull ?: url
+                                val partText = content["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                                val start = annotation["start_index"]?.jsonPrimitive?.intOrNull
+                                val end = annotation["end_index"]?.jsonPrimitive?.intOrNull
+                                if (start != null && end != null && start >= 0 && end > start && end <= partText.length) {
+                                    inlineCitations += InlineSearchCitation(url, partText.substring(start, end))
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -481,10 +538,10 @@ object AIClient {
         consumeEvent()
         if (!completed) throw CodexProtocolException("Connection ended before the response completed. Retry to continue.")
         if (toolCalls.size > 1) throw CodexProtocolException("Only one tool call is supported per response")
-        val text = output.toString()
+        val text = renderSearchCitations(output.toString(), citations, inlineCitations)
         if (toolCalls.isEmpty() && text.isBlank())
             throw CodexProtocolException("Codex completed without returning text")
-        return CodexResponse(text, toolCalls.values.toList(), reasoningItems.values.toList())
+        return CodexResponse(text, toolCalls.values.toList(), reasoningItems.values.toList(), searches.values.toList())
     }
 
     private fun extractCompletedText(event: JsonObject): String? {

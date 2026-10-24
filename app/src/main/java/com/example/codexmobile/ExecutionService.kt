@@ -39,6 +39,10 @@ class ExecutionService : Service() {
             onStop = controller::stopExecution,
             onFollowUp = controller::sendMessage,
             onDismiss = { overlayDismissedForTurn = true },
+            onAnswer = { callId, answer ->
+                controller.pendingQuestion.value?.callId == callId && controller.answerQuestion(answer)
+            },
+            onSkip = { callId -> controller.pendingQuestion.value?.callId == callId && controller.skipQuestion() },
         )
         controller.isTyping.onEach { typing ->
             if (typing && !typingPreviously) overlayDismissedForTurn = false
@@ -49,6 +53,7 @@ class ExecutionService : Service() {
         controller.phase.onEach { refreshOverlay() }.launchIn(serviceScope)
         controller.attachmentStatus.onEach { refreshOverlay() }.launchIn(serviceScope)
         controller.messages.onEach { refreshOverlay() }.launchIn(serviceScope)
+        controller.pendingQuestion.onEach { refreshOverlay() }.launchIn(serviceScope)
         if (Build.VERSION.SDK_INT >= 26) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
                 NotificationChannel(CHANNEL, "Active CodexR work", NotificationManager.IMPORTANCE_LOW),
@@ -123,7 +128,7 @@ class ExecutionService : Service() {
             ?: controller.phase.value.takeIf { it.isNotBlank() }
             ?: controller.messages.value.lastOrNull()?.content
             ?: "Processing…"
-        overlay.showOrUpdate(latest)
+        overlay.showOrUpdate(latest, controller.pendingQuestion.value)
     }
 
     companion object {

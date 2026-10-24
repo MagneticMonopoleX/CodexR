@@ -18,6 +18,8 @@ import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.ScrollView
+import com.example.codexmobile.api.AgentQuestion
 import kotlin.math.roundToInt
 
 /** A small, app-owned control surface shown only while CodexR works in the background. */
@@ -26,6 +28,8 @@ class ExecutionOverlay(
     private val onStop: () -> Unit,
     private val onFollowUp: (String) -> Boolean,
     private val onDismiss: () -> Unit,
+    private val onAnswer: (String, String) -> Boolean = { _, _ -> false },
+    private val onSkip: (String) -> Boolean = { false },
 ) {
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private var root: LinearLayout? = null
@@ -33,14 +37,32 @@ class ExecutionOverlay(
     private var composer: LinearLayout? = null
     private var input: EditText? = null
     private var params: WindowManager.LayoutParams? = null
+    private var questionContainer: ScrollView? = null
+    private var questionId: String? = null
+    private var headerView: TextView? = null
+    private var followUpButton: Button? = null
+    private var panelTextColor: Int = Color.BLACK
 
-    fun showOrUpdate(message: String) {
+    fun showOrUpdate(message: String, question: AgentQuestion? = null) {
         if (!Settings.canDrawOverlays(context) || isDeviceLocked()) {
             hide()
             return
         }
         if (root == null) create()
         messageView?.text = compactOverlayMessage(message)
+        headerView?.text = if (question == null) "CodexR is working" else "CodexR has a question"
+        messageView?.visibility = if (question == null) View.VISIBLE else View.GONE
+        followUpButton?.visibility = if (question == null) View.VISIBLE else View.GONE
+        if (questionId != question?.callId) {
+            setComposerVisible(false)
+            questionContainer?.removeAllViews()
+            questionId = question?.callId
+            questionContainer?.visibility = if (question == null) View.GONE else View.VISIBLE
+            if (question != null) questionContainer?.addView(OverlayQuestionView(context, question, panelTextColor,
+                onCustomInput = { editor -> setKeyboardTarget(editor) },
+                onAnswer = { answer -> onAnswer(question.callId, answer) },
+                onSkip = { onSkip(question.callId) }))
+        }
     }
 
     fun hide() {
@@ -50,6 +72,10 @@ class ExecutionOverlay(
         composer = null
         input = null
         params = null
+        questionContainer = null
+        questionId = null
+        headerView = null
+        followUpButton = null
     }
 
     private fun create() {
@@ -57,6 +83,7 @@ class ExecutionOverlay(
             Configuration.UI_MODE_NIGHT_YES
         val panelColor = if (dark) Color.rgb(31, 31, 35) else Color.rgb(250, 249, 255)
         val textColor = if (dark) Color.WHITE else Color.rgb(32, 31, 36)
+        panelTextColor = textColor
         val accentColor = if (dark) Color.rgb(128, 108, 255) else Color.rgb(79, 55, 224)
 
         val panel = LinearLayout(context).apply {
@@ -73,12 +100,12 @@ class ExecutionOverlay(
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        header.addView(TextView(context).apply {
+        headerView = TextView(context).apply {
             text = "CodexR is working"
             setTextColor(textColor)
             textSize = 14f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
-        }, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
+        }.also { header.addView(it, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f)) }
         header.addView(ImageButton(context).apply {
             setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
             contentDescription = "Hide overlay"
@@ -95,6 +122,11 @@ class ExecutionOverlay(
             setPadding(0, dp(4), 0, dp(10))
         }.also { panel.addView(it, LinearLayout.LayoutParams(-1, -2)) }
 
+        questionContainer = ScrollView(context).apply { visibility = View.GONE }.also {
+            panel.addView(it, LinearLayout.LayoutParams(-1,
+                minOf(dp(300), context.resources.displayMetrics.heightPixels / 3)))
+        }
+
         val actions = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
@@ -105,12 +137,12 @@ class ExecutionOverlay(
             backgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(183, 28, 28))
             setOnClickListener { onStop() }
         }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(8) })
-        actions.addView(Button(context).apply {
+        followUpButton = Button(context).apply {
             text = "Follow up"
             setTextColor(Color.WHITE)
             backgroundTintList = android.content.res.ColorStateList.valueOf(accentColor)
             setOnClickListener { setComposerVisible(composer?.visibility != View.VISIBLE) }
-        }, LinearLayout.LayoutParams(0, dp(44), 1f))
+        }.also { actions.addView(it, LinearLayout.LayoutParams(0, dp(44), 1f)) }
         panel.addView(actions)
 
         composer = LinearLayout(context).apply {
@@ -164,20 +196,24 @@ class ExecutionOverlay(
     }
 
     private fun setComposerVisible(visible: Boolean) {
+        composer?.visibility = if (visible) View.VISIBLE else View.GONE
+        setKeyboardTarget(if (visible) input else null)
+    }
+
+    private fun setKeyboardTarget(editor: EditText?) {
         val panel = root ?: return
         val layoutParams = params ?: return
-        composer?.visibility = if (visible) View.VISIBLE else View.GONE
-        layoutParams.flags = if (visible) {
+        layoutParams.flags = if (editor != null) {
             layoutParams.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
         } else {
             layoutParams.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         }
         runCatching { windowManager.updateViewLayout(panel, layoutParams) }
-        if (visible) {
-            input?.requestFocus()
-            input?.post {
+        if (editor != null) {
+            editor.requestFocus()
+            editor.post {
                 context.getSystemService(InputMethodManager::class.java)
-                    .showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+                    .showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT)
             }
         } else {
             context.getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(panel.windowToken, 0)
