@@ -14,6 +14,7 @@ data class CodexModelOption(
     val supportedReasoningLevels: List<ReasoningLevel> = DEFAULT_REASONING_LEVELS,
     val defaultReasoningLevel: ReasoningLevel = ReasoningLevel.MEDIUM,
     val priority: Int = Int.MAX_VALUE,
+    val contextWindow: Long? = null,
 )
 
 @Serializable
@@ -68,6 +69,12 @@ data class ChatSession(
     val turnInProgress: Boolean = false,
     val lastError: String? = null,
     val webSearchEnabled: Boolean = false,
+    val contextCheckpoint: ContextCheckpoint? = null,
+    val lastInputTokens: Long? = null,
+    val usageMessageCount: Int = 0,
+    val usageModelId: String? = null,
+    val usageAuthScope: String? = null,
+    val usageCheckpointAt: Long? = null,
 ) {
     companion object {
         fun create(

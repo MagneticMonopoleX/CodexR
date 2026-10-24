@@ -25,6 +25,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -152,6 +153,9 @@ fun ChatScreen(
     val draftAttachments by viewModel.draftAttachments.collectAsState()
     val attachmentStatus by viewModel.attachmentStatus.collectAsState()
     val attachmentError by viewModel.attachmentError.collectAsState()
+    val contextStatus by viewModel.contextStatus.collectAsState()
+    val transferBusy by viewModel.transferBusy.collectAsState()
+    val transferStatus by viewModel.transferStatus.collectAsState()
 
     val context = LocalContext.current
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -166,6 +170,20 @@ fun ChatScreen(
     var editingMessage by remember { mutableStateOf<ChatMessage?>(null) }
     var showCaptureConfirmation by remember { mutableStateOf(false) }
     var overlayAllowed by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var exportSessionId by rememberSaveable { mutableStateOf<String?>(null) }
+    val exportPicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) exportSessionId?.let { viewModel.exportChat(uri, it) }
+        exportSessionId = null
+    }
+    val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) viewModel.importChat(uri)
+    }
+    fun chooseChatExport(sessionId: String) {
+        val session = sessions.firstOrNull { it.id == sessionId } ?: return
+        exportSessionId = session.id
+        val title = session.title.replace(Regex("[^A-Za-z0-9._-]+"), "-").trim('-').take(60).ifBlank { "chat" }
+        exportPicker.launch("CodexR-$title.zip")
+    }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         viewModel.addAttachments(uris)
     }
@@ -262,6 +280,10 @@ fun ChatScreen(
                 onSearch = { showChatSearch = true },
                 webSearchEnabled = webSearchEnabled,
                 onWebSearchChange = viewModel::setWebSearchEnabled,
+                contextStatus = contextStatus,
+                onCompact = viewModel::compactNow,
+                onExport = ::chooseChatExport,
+                onImport = { importPicker.launch(arrayOf("application/zip", "application/octet-stream", "application/x-zip-compressed")) },
                 activeSessionId = activeSessionId,
                 modelCatalog = modelCatalog,
                 accessMode = accessMode,
@@ -270,7 +292,7 @@ fun ChatScreen(
                 usage = usage,
                 isUsageLoading = isUsageLoading,
                 usageError = usageError,
-                enabled = isReady && !isTyping && pendingCommand == null,
+                enabled = isReady && !isTyping && pendingCommand == null && !transferBusy && attachmentStatus == null,
                 onCreate = {
                     viewModel.createSession()
                     coroutineScope.launch { drawerState.close() }
@@ -358,11 +380,13 @@ fun ChatScreen(
                     models = modelCatalog,
                     supportedReasoningLevels = supportedReasoningLevels,
                     catalogStatus = modelCatalogStatus,
-                    enabled = isReady && !isTyping,
+                    enabled = isReady && !isTyping && !transferBusy,
                     onModelSelected = viewModel::setModel,
                     onReasoningSelected = viewModel::setReasoningLevel,
                     onRefresh = viewModel::refreshModels,
                 )
+                transferStatus?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.bodySmall) }
 
                 if (!isReady) {
                     Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -394,7 +418,7 @@ fun ChatScreen(
                 }
 
                 if (queuedMessages.isNotEmpty()) Column(Modifier.fillMaxWidth().heightIn(max = 144.dp).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
-                    Text(if (isTyping) "Queued • sent after the next tool result (or when this response finishes)" else "Queued • included when you retry or send", style = MaterialTheme.typography.labelSmall)
+                    Text(if (isTyping) "Follow-up pending • waiting for the current action or context preparation" else "Queued • included when you retry or send", style = MaterialTheme.typography.labelSmall)
                     queuedMessages.forEach { queued ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(queued.content.ifBlank { "${queued.attachments.size} attachment(s)" }, maxLines = 2, modifier = Modifier.weight(1f))
@@ -417,7 +441,7 @@ fun ChatScreen(
                 ) {
                     var attachmentMenu by remember { mutableStateOf(false) }
                     Box {
-                        IconButton(onClick = { attachmentMenu = true }, enabled = isReady && attachmentStatus == null) {
+                        IconButton(onClick = { attachmentMenu = true }, enabled = isReady && !transferBusy && attachmentStatus == null) {
                             Icon(Icons.Default.AttachFile, "Attach files or capture screen")
                         }
                         DropdownMenu(expanded = attachmentMenu, onDismissRequest = { attachmentMenu = false }) {
@@ -432,7 +456,7 @@ fun ChatScreen(
                     OutlinedTextField(
                         value = inputText,
                         onValueChange = { inputText = it },
-                        enabled = isReady,
+                        enabled = isReady && !transferBusy,
                         modifier = Modifier.weight(1f),
                         placeholder = { Text(if (isTyping) "Add a follow-up…" else "Type a prompt…") },
                         maxLines = 5,
@@ -445,7 +469,7 @@ fun ChatScreen(
                     val canContinue = !isTyping && canRetry && inputText.isBlank() && draftAttachments.isEmpty()
                     if (canContinue) TextButton(
                         onClick = { viewModel.continueResponse() },
-                        enabled = isReady && attachmentStatus == null,
+                        enabled = isReady && !transferBusy && attachmentStatus == null,
                     ) { Text("Continue") }
                     else IconButton(
                         onClick = {
@@ -453,7 +477,7 @@ fun ChatScreen(
                                 inputText = ""
                             }
                         },
-                        enabled = isReady && attachmentStatus == null && (inputText.isNotBlank() || draftAttachments.isNotEmpty()),
+                        enabled = isReady && !transferBusy && attachmentStatus == null && (inputText.isNotBlank() || draftAttachments.isNotEmpty()),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = if (isTyping) "Queue follow-up" else "Send")
                     }
@@ -469,6 +493,10 @@ private fun SessionDrawer(
     onSearch: () -> Unit,
     webSearchEnabled: Boolean,
     onWebSearchChange: (Boolean) -> Unit,
+    contextStatus: String,
+    onCompact: () -> Unit,
+    onExport: (String) -> Unit,
+    onImport: () -> Unit,
     activeSessionId: String?,
     modelCatalog: List<CodexModelOption>,
     accessMode: ShellAccessMode,
@@ -537,6 +565,8 @@ private fun SessionDrawer(
             Text(if (showSettings) "Hide settings" else "Settings & web search")
         }
         if (showSettings) Column(Modifier.fillMaxWidth().heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
+        ChatStorageControls(contextStatus, enabled, sessions.firstOrNull { it.id == activeSessionId }?.messages?.isNotEmpty() == true,
+            onCompact, { activeSessionId?.let(onExport) }, onImport)
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Web search", style = MaterialTheme.typography.titleSmall)
@@ -636,28 +666,61 @@ private fun SessionDrawer(
         )
         LazyColumn(modifier = Modifier.weight(1f), contentPadding = PaddingValues(8.dp)) {
             items(sessions, key = { it.id }) { session ->
-                NavigationDrawerItem(
-                    selected = session.id == activeSessionId,
-                    onClick = { if (enabled) onSelect(session.id) },
-                    label = {
-                        Column {
-                            Text(session.title, maxLines = 1)
-                            Text(
-                                "${modelLabel(session.modelId, modelCatalog)} / ${session.reasoningLevel.label}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    },
-                    badge = {
-                        IconButton(onClick = { if (enabled) onDelete(session.id) }, enabled = enabled) {
-                            Icon(Icons.Default.Delete, contentDescription = "Delete ${session.title}")
-                        }
-                    },
-                    modifier = Modifier.padding(vertical = 2.dp),
-                )
+                SessionListItem(session, session.id == activeSessionId, modelLabel(session.modelId, modelCatalog),
+                    enabled, onSelect, onExport, onDelete)
             }
         }
+    }
+}
+
+@Composable
+internal fun SessionListItem(session: ChatSession, selected: Boolean, modelName: String, enabled: Boolean,
+    onSelect: (String) -> Unit, onExport: (String) -> Unit, onDelete: (String) -> Unit) {
+    var showActions by remember(session.id) { mutableStateOf(false) }
+    LaunchedEffect(enabled) { if (!enabled) showActions = false }
+    NavigationDrawerItem(
+        selected = selected,
+        onClick = { if (enabled) onSelect(session.id) },
+        label = { Column {
+            Text(session.title, maxLines = 1)
+            Text("$modelName / ${session.reasoningLevel.label}", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } },
+        badge = { Box {
+            IconButton(onClick = { showActions = true }, enabled = enabled,
+                modifier = Modifier.testTag("chat-actions-${session.id}")) {
+                Icon(Icons.Default.MoreVert, contentDescription = "Actions for ${session.title}")
+            }
+            DropdownMenu(expanded = showActions, onDismissRequest = { showActions = false }) {
+                DropdownMenuItem(text = { Text("Export chat") }, enabled = enabled,
+                    modifier = Modifier.testTag("chat-export-${session.id}"), onClick = {
+                        showActions = false
+                        onExport(session.id)
+                    })
+                DropdownMenuItem(text = { Text("Delete chat") }, enabled = enabled,
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }, onClick = {
+                        showActions = false
+                        onDelete(session.id)
+                    })
+            }
+        } },
+        modifier = Modifier.testTag("chat-row-${session.id}").padding(vertical = 2.dp),
+    )
+}
+
+@Composable
+internal fun ChatStorageControls(contextStatus: String, enabled: Boolean, hasMessages: Boolean,
+    onCompact: () -> Unit, onExport: () -> Unit, onImport: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Text("Conversation storage", style = MaterialTheme.typography.titleSmall)
+        Text(contextStatus, style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = onCompact, enabled = enabled && hasMessages) { Text("Compact now") }
+        Row {
+            TextButton(onClick = onExport, enabled = enabled) { Text("Export chat") }
+            TextButton(onClick = onImport, enabled = enabled) { Text("Import chat") }
+        }
+        Text("Exports contain the full chat and attachments. Keep them private. Imports create a new chat.",
+            style = MaterialTheme.typography.bodySmall)
     }
 }
 

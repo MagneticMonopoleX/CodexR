@@ -67,22 +67,46 @@ class ChatFeaturesTest {
         assertTrue(skipped)
     }
 
-    @Test fun overlayQuestionSupportsCustomAnswerOnDevice() {
-        var received: String? = null
-        compose.setContent {
-            androidx.compose.ui.viewinterop.AndroidView(factory = { context ->
-                com.example.codexmobile.OverlayQuestionView(context,
-                    AgentQuestion("q", "Which device?", listOf("Tablet", "Phone")), android.graphics.Color.BLACK,
-                    onCustomInput = { it?.requestFocus() }, onAnswer = { received = it; true }, onSkip = { true })
-            })
-        }
-        androidx.test.espresso.Espresso.onView(androidx.test.espresso.matcher.ViewMatchers.withText("Specify your own"))
-            .perform(androidx.test.espresso.action.ViewActions.click())
-        androidx.test.espresso.Espresso.onView(androidx.test.espresso.matcher.ViewMatchers.withContentDescription("Custom answer"))
-            .perform(androidx.test.espresso.action.ViewActions.replaceText("My tablet"), androidx.test.espresso.action.ViewActions.closeSoftKeyboard())
-        assertNull(received)
-        androidx.test.espresso.Espresso.onView(androidx.test.espresso.matcher.ViewMatchers.withText("Answer"))
-            .perform(androidx.test.espresso.action.ViewActions.click())
-        assertEquals("My tablet", received)
+    @Test fun storageControlsExposeActionsAndDisableThemDuringWork() {
+        var compactions = 0
+        var exports = 0
+        var imports = 0
+        val enabled = androidx.compose.runtime.mutableStateOf(true)
+        compose.setContent { MaterialTheme {
+            ChatStorageControls("Full history saved locally · auto compact on", enabled.value, true,
+                { compactions++ }, { exports++ }, { imports++ })
+        } }
+        compose.onNodeWithText("Compact now").performClick()
+        compose.onNodeWithText("Export chat").performClick()
+        compose.onNodeWithText("Import chat").performClick()
+        assertEquals(1, compactions)
+        assertEquals(1, exports)
+        assertEquals(1, imports)
+        compose.runOnIdle { enabled.value = false }
+        compose.onNodeWithText("Compact now").assertIsNotEnabled()
+        compose.onNodeWithText("Export chat").assertIsNotEnabled()
+        compose.onNodeWithText("Import chat").assertIsNotEnabled()
+    }
+
+    @Test fun exportTargetsChosenChatWithoutSelectingOrDeletingIt() {
+        val active = ChatSession.create().copy(title = "Active chat")
+        val other = ChatSession.create().copy(title = "Other chat")
+        var selected = active.id
+        var exported: String? = null
+        var deleted: String? = null
+        val enabled = androidx.compose.runtime.mutableStateOf(true)
+        compose.setContent { MaterialTheme { androidx.compose.foundation.layout.Column {
+            listOf(active, other).forEach { session ->
+                SessionListItem(session, session.id == selected, "Model", enabled.value,
+                    { selected = it }, { exported = it }, { deleted = it })
+            }
+        } } }
+        compose.onNodeWithTag("chat-actions-${other.id}").performClick()
+        compose.onNodeWithTag("chat-export-${other.id}").performClick()
+        assertEquals(other.id, exported)
+        assertEquals(active.id, selected)
+        assertNull(deleted)
+        compose.runOnIdle { enabled.value = false }
+        compose.onNodeWithTag("chat-actions-${other.id}").assertIsNotEnabled()
     }
 }

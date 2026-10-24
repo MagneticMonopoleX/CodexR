@@ -19,6 +19,8 @@ CodexR is an independent project. It is not an official OpenAI product and is no
 
 **Current release: [v1.1.0](https://github.com/MagneticMonopoleX/CodexR/releases/tag/v1.1.0)** · [Download APK](https://github.com/MagneticMonopoleX/CodexR/releases/download/v1.1.0/CodexR-v1.1.0.apk) · [Release notes](docs/releases/v1.1.0.md)
 
+**Latest prerelease: [v1.2.0-dev.5](https://github.com/MagneticMonopoleX/CodexR/releases/tag/v1.2.0-dev.5)** · [Download APK](https://github.com/MagneticMonopoleX/CodexR/releases/download/v1.2.0-dev.5/CodexR-v1.2.0-dev.5.apk) · [Release notes](docs/releases/v1.2.0-dev.5.md). Adds automatic context compaction, portable chat archives, per-chat export, and immediate client-side steering.
+
 1. Download the APK from the release page and install it on a rooted Android 7.0+ device. Allow installation from your browser or file manager when Android asks.
 2. Open CodexR and sign in with ChatGPT or enter an OpenAI Platform API key.
 3. Start a chat, choose a model and reasoning level, and review each requested root action. Grant CodexR access in your root manager when prompted.
@@ -46,7 +48,9 @@ The release includes `SHA256SUMS.txt` for download integrity checks. Android SDK
 - System, light, and dark themes
 - Selectable Markdown responses with tables, task lists, code blocks, and offline LaTeX rendering
 - Streaming responses, Stop, error retry, and long-press editing of user messages
-- Follow-ups queued during processing and delivered with the next tool result
+- Immediate client-side steering during model inference; follow-ups wait safely for running tool results
+- Automatic context compaction with the complete searchable chat history retained locally
+- Export any individual chat with its attachments and import it as a separate chat
 - Background execution with a work notification, floating live-status overlay, Stop and follow-up controls, and screen-awake behavior
 - Image, text/code, and PDF attachments with local previews
 - An AI-callable `capture_screen` tool that returns the current display as an image
@@ -149,7 +153,7 @@ On Windows, `scripts/package-preview.ps1` runs the checks, builds both variants,
 ./scripts/package-preview.ps1
 ```
 
-## Upcoming: questions and search
+## Questions and search (v1.2.0 previews)
 
 These source changes are not included in the published v1.1.0 APK yet.
 
@@ -157,6 +161,20 @@ These source changes are not included in the published v1.1.0 APK yet.
 - **Search chats:** use **Search chats** in the sidebar to search saved titles, messages, and command output locally. Select a result to open the chat at the matching message, expanding a folded action when needed. Hidden reasoning is excluded. Stop an active response before navigating to a search result.
 - **Web search:** enable it for the current chat under **Settings & web search** in the sidebar. It is off by default, sends search queries to the model provider, and may incur additional API charges. Supported backends return folded search activity and clickable inline citations/source links. Availability depends on the selected model and account; if the backend rejects search, switch it off and retry. There is no scraping fallback or extra search-service API key. ChatGPT-backend availability is not guaranteed by the public API documentation.
 - **Shell examples:** only structured `exec_command` calls request execution. Shell code fences in explanations or web results are never automatically executed.
+
+## Context compaction and portable chats (v1.2.0-dev.3)
+
+CodexR automatically compacts model context as a chat grows. It starts at roughly 70% of the context window advertised by the model catalog, using observed input-token usage and a conservative local estimate. When the provider does not advertise a window, CodexR uses a 128,000-token fallback budget. A context-limit rejection also triggers one compaction/retry attempt.
+
+Compaction only replaces the context sent to the model. The complete transcript, command output, attachments, and queued follow-ups stay saved locally and remain searchable. CodexR stores a separate checkpoint and sends that checkpoint plus subsequent messages on future turns. It uses the provider's native `/responses/compact` endpoint and preserves its entire returned context window. If the account/backend explicitly lacks that endpoint, it falls back to a tool-free model-generated summary. Summary fallback can lose detail; the complete transcript remains available locally. Compaction uses model quota and may incur API charges. See [OpenAI's compaction documentation](https://developers.openai.com/api/docs/guides/compaction).
+
+Under **Settings & web search → Conversation storage**, you can see the compaction status or tap **Compact now**. Editing an older prompt invalidates the checkpoint; switching models or accounts also prevents reuse of incompatible context. Stopping compaction preserves the previous usable context and full transcript. Saved commands are never executed by compaction.
+
+Use **Export chat** in the same section to save a ZIP containing `chat.json` and all referenced attachments, including the full transcript before compaction. Use **Import chat** to open a CodexR ZIP as a new chat. Existing chats are not replaced, and importing does not start the agent. Review the imported chat, then send a message or tap **Continue** to resume.
+
+To export a specific chat without opening it, tap the **⋮** actions button beside that chat in the sidebar and choose **Export chat** (v1.2.0-dev.4). The selected chat stays open, and the archive uses the chosen chat's title and full history. **Delete chat** is also available in that menu.
+
+Archives exclude saved sign-in, API-key settings, root grants, and the model-context checkpoint. Imported provider reasoning stays archived locally but is not reused as account-bound model context. Exports may contain private information from your messages, command output, and attachments; store and share them accordingly. The current format supports archives up to 128 MB, up to 50,000 messages and 1,000 attachments, with existing per-file limits. Malformed, unsupported, or incomplete archives are rejected without replacing existing chats.
 
 ## Chat controls
 
@@ -167,7 +185,7 @@ These source changes are not included in the published v1.1.0 APK yet.
 - **Stop:** the square button cancels the network request and signals the active root process group. The work notification also has a Stop action. You can then edit the last prompt or retry.
 - **Continue:** after a stopped or failed response, an empty composer shows **Continue** in place of Send. It asks the agent to resume from saved context and inspect interrupted work before retrying. Typing a message or adding an attachment switches back to Send.
 - **Retry:** after an error or interruption, Retry response continues from the saved conversation. It does not directly replay completed commands; the model may request additional commands under the selected approval policy.
-- **Follow-up:** type and send while CodexR is processing. The message is queued until the next tool result, or the end of the current response if no tool is used. Queued messages can be edited or removed. They remain queued if you stop or encounter an error.
+- **Follow-up / steering:** type and send while CodexR is processing. During model inference, this interrupts the HTTP stream and continues the same logical turn with your new message, without waiting for a tool call. Interrupted text remains in local history but is not treated as a completed model response. Already-running commands are not cancelled or replayed: follow-ups wait for their result, or for an outstanding approval/question or compaction to finish. Pending messages can be edited or removed and remain saved if you stop or encounter an error. Stop still cancels the entire turn. This is client-side steering, not the backend `response.steer` protocol.
 
 Shell actions are stored as Responses API function-call/function-output pairs, rather than inferred from ordinary Markdown. Stopping during approval records that the command did not run; stopping during execution records an interrupted result and warns the model to inspect device state before retrying. This keeps stop, retry, and follow-up behavior stable in long conversations.
 
@@ -187,7 +205,7 @@ Manual capture is also available in the paperclip menu. It waits three seconds s
 
 Active turns run independently of the activity, with a foreground-service notification and a partial wake lock. CodexR keeps its screen awake while processing, but does not prevent you from locking the device yourself. Screen-awake and CPU wake locks are released when work stops.
 
-Enable **Floating work overlay** in the sidebar and grant Android's **Display over other apps** permission to see the latest partial response or execution status while another app is open. The draggable overlay has an immediate **Stop** button and an inline **Follow up** composer. Follow-ups use the same queue as the main chat and are delivered at the next tool boundary. The overlay is shown only during active background work, hides when CodexR returns to the foreground, and does not intentionally display over the lock screen.
+Enable **Floating work overlay** in the sidebar and grant Android's **Display over other apps** permission to see the latest partial response or execution status while another app is open. The draggable overlay has an immediate **Stop** button and an inline **Follow up** composer. Follow-ups use the same steering behavior as the main chat: interrupt inference, but wait for running actions. The overlay is shown only during active background work, hides when CodexR returns to the foreground, and does not intentionally display over the lock screen.
 
 Allow notification permission so Stop is readily accessible. Open **Background execution / battery settings** in the sidebar and set CodexR to **Unrestricted** / **Don't optimize** for reliable screen-off networking. Vendor power-saving settings may also need adjustment. Android deep sleep can restrict networking without an exemption, and Android 15+ limits `dataSync` foreground-service background time. See [Android's Doze guidance](https://developer.android.com/training/monitoring-device-state/doze-standby) and [foreground-service timeouts](https://developer.android.com/develop/background-work/services/fgs/timeout).
 
@@ -221,7 +239,9 @@ Instrumented tests require a connected Android device. They now use a separate `
 
 The folded-action update adds seven grouping/status unit tests and two on-device UI tests for collapsed defaults and preserving expansion when results arrive.
 
-The feature update was verified with 29 local tests, three targeted device tests on a rooted Lenovo TB-J716F running Android 16, and live checks for Markdown/LaTeX selection, AI-requested screenshots, background completion, floating overlay controls, and queued follow-ups with the screen off. This does not establish compatibility with every device or root manager.
+The current update passes 74 local unit tests and release lint/build checks. Live client-side steering was verified on the rooted Lenovo TB-J716F with ChatGPT sign-in: the initial HTTP stream was cancelled and the continuation followed the new instruction. Compaction was also checked live, with the full transcript retained. Archive and per-chat export behavior have isolated device-test coverage. This does not establish compatibility with every account, device, or root manager.
+
+The two live inference diagnostics are opt-in and skipped in ordinary connected-test runs. They require a separately packaged, same-signed instrumentation APK targeting the normal app to access its saved login. The client-steering diagnostic uses a disposable transcript and cannot execute root commands. Do not retarget Gradle's connected tests to the normal app, publish private backups, or include account credentials in diagnostic output.
 
 ## Project structure
 

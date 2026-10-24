@@ -11,7 +11,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -37,6 +41,8 @@ import com.example.codexmobile.data.DEFAULT_CODEX_MODEL_ID
 import com.example.codexmobile.data.ModelCatalogState
 import com.example.codexmobile.data.ModelCatalogStore
 import com.example.codexmobile.data.ReasoningLevel
+import com.example.codexmobile.data.ConversationContext
+import com.example.codexmobile.data.ChatArchiveStore
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -47,7 +53,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 // Application-owned: the activity may be recreated without cancelling the conversation.
-class ChatViewModel(private val application: Application, private val runtime: ChatRuntime = AndroidChatRuntime(application)) {
+class ChatViewModel(private val application: Application, private val runtime: ChatRuntime = AndroidChatRuntime(application),
+    private val contextDispatcher: CoroutineDispatcher = Dispatchers.Default) {
     private val viewModelScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val accessPreferences = ShellAccessPreferences(application)
     private val sessionStore = ChatSessionStore(application)
@@ -57,6 +64,9 @@ class ChatViewModel(private val application: Application, private val runtime: C
     private var sessionState: ChatSessionState? = null
     private var automaticCommandsThisTurn = 0
     private var turnJob: Job? = null
+    // Only inference is preempted by steering; tool execution and Stop own separate lifetimes.
+    private var inferenceJob: Job? = null
+    private class SteeringInterrupt : CancellationException("Follow-up received")
     private var attachmentJob: Job? = null
     private var approval: CompletableDeferred<CommandDecision>? = null
     private var questionAnswer: CompletableDeferred<String?>? = null
@@ -76,6 +86,13 @@ class ChatViewModel(private val application: Application, private val runtime: C
     val sessionRootAllowed: StateFlow<Boolean> = _sessionRootAllowed
     private val _canRetry = MutableStateFlow(false)
     val canRetry: StateFlow<Boolean> = _canRetry
+    private val _contextStatus = MutableStateFlow("Full history saved locally · auto compact on")
+    val contextStatus: StateFlow<String> = _contextStatus
+    private val archiveStore = ChatArchiveStore(application)
+    private val _transferBusy = MutableStateFlow(false)
+    val transferBusy: StateFlow<Boolean> = _transferBusy
+    private val _transferStatus = MutableStateFlow<String?>(null)
+    val transferStatus: StateFlow<String?> = _transferStatus
     private val _draftAttachments = MutableStateFlow<List<MessageAttachment>>(emptyList())
     val draftAttachments: StateFlow<List<MessageAttachment>> = _draftAttachments
     private val _attachmentStatus = MutableStateFlow<String?>(null)
@@ -221,6 +238,7 @@ class ChatViewModel(private val application: Application, private val runtime: C
             it.copy(
                 modelId = modelId,
                 reasoningLevel = model.defaultReasoningLevel,
+                contextCheckpoint = null, lastInputTokens = null,
                 updatedAt = System.currentTimeMillis(),
             )
         }
@@ -249,6 +267,7 @@ class ChatViewModel(private val application: Application, private val runtime: C
     }
 
     fun sendMessage(userText: String): Boolean {
+        if (_transferBusy.value) return false
         if (_pendingQuestion.value != null && userText.isNotBlank() && _draftAttachments.value.isEmpty()) {
             return answerQuestion(userText)
         }
@@ -263,6 +282,7 @@ class ChatViewModel(private val application: Application, private val runtime: C
         _draftAttachments.value = emptyList()
         if (_isTyping.value) {
             updateSession(sessionId) { it.copy(queuedMessages = it.queuedMessages + message) }
+            inferenceJob?.cancel(SteeringInterrupt())
         } else {
             flushQueued(sessionId)
             appendMessage(sessionId, message)
@@ -290,8 +310,54 @@ class ChatViewModel(private val application: Application, private val runtime: C
 
     fun skipQuestion(): Boolean = questionAnswer?.complete(null) ?: false
 
-    private fun processAI(sessionId: String) {
+    fun compactNow() {
+        if (!_isTyping.value && _isReady.value && !_transferBusy.value && _attachmentStatus.value == null) {
+            _activeSessionId.value?.takeIf { findSession(it)?.messages?.isNotEmpty() == true }
+                ?.let { processAI(it, compactOnly = true) }
+        }
+    }
+
+    fun exportChat(uri: Uri, sessionId: String) {
+        if (!canChangeSession() || _attachmentStatus.value != null) return
+        val snapshot = findSession(sessionId) ?: return
+        _transferBusy.value = true
+        _transferStatus.value = "Exporting chat…"
+        viewModelScope.launch {
+            try {
+                archiveStore.export(uri, snapshot)
+                _transferStatus.value = "Chat exported with its full history and attachments."
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                _transferStatus.value = "Export failed: ${error.message}"
+            } finally { _transferBusy.value = false }
+        }
+    }
+
+    fun importChat(uri: Uri) {
+        if (!canChangeSession() || _attachmentStatus.value != null) return
+        _transferBusy.value = true
+        _transferStatus.value = "Importing chat…"
+        viewModelScope.launch {
+            var imported: ChatSession? = null
+            try {
+                imported = archiveStore.import(uri)
+                coroutineContext.ensureActive()
+                val state = sessionState ?: error("Chats are not ready.")
+                val session = imported
+                applyState(state.copy(activeSessionId = session.id, sessions = state.sessions + session))
+                imported = null // Ownership transfers to the saved chat; no root grants are imported.
+                _transferStatus.value = "Chat imported. Nothing has been executed."
+            } catch (error: Exception) {
+                imported?.let(archiveStore::discardImported)
+                if (error is CancellationException) throw error
+                _transferStatus.value = "Import failed: ${error.message}"
+            } finally { _transferBusy.value = false }
+        }
+    }
+
+    private fun processAI(sessionId: String, compactOnly: Boolean = false) {
         if (_isTyping.value) return
+        val previousError = findSession(sessionId)?.lastError
         findSession(sessionId) ?: return
         _errorMessage.value = null
         _canRetry.value = false
@@ -307,22 +373,73 @@ class ChatViewModel(private val application: Application, private val runtime: C
         turnJob = viewModelScope.launch {
             var commandInFlight = false
             var activeToolCall: CodexToolCall? = null
+            var compactWithoutResponse = compactOnly
+            var compactedWithoutResponse = false
             try {
-                flushQueued(sessionId)
+                if (!compactOnly) flushQueued(sessionId)
+                val scope = runtime.contextScope()
+                var contextRecoveryAttempted = false
                 while (true) {
                     coroutineContext.ensureActive()
-                    val session = findSession(sessionId) ?: break
+                    var session = findSession(sessionId) ?: break
+                    val window = _modelCatalog.value.firstOrNull { it.id == session.modelId }?.contextWindow
+                    val needsCompaction = compactWithoutResponse || withContext(contextDispatcher) {
+                        ConversationContext.shouldCompact(session, scope, window)
+                    }
+                    if (needsCompaction) {
+                        compactSession(sessionId, scope)
+                        if (compactWithoutResponse) {
+                            if (!flushQueued(sessionId)) { compactedWithoutResponse = true; break }
+                            compactWithoutResponse = false
+                        }
+                    }
+                    flushQueued(sessionId)
+                    session = findSession(sessionId) ?: break
                     _phase.value = "Thinking…"
                     _streamingText.value = ""
-                    val requestContext = coroutineContext
-                    val response = runtime.respond(
-                        messages = listOf(SYSTEM_PROMPT) + session.messages.filterNot { it.kind == "partial" },
-                        modelId = session.modelId,
-                        reasoningLevel = session.reasoningLevel,
-                        webSearchEnabled = session.webSearchEnabled,
-                        onPartial = { if (requestContext[Job]?.isActive == true) _streamingText.value = it },
-                    )
+                    suspend fun respond() = supervisorScope {
+                        val request = async(start = CoroutineStart.LAZY) {
+                            val requestContext = coroutineContext
+                            runtime.respond(
+                                messages = listOf(SYSTEM_PROMPT) + withContext(contextDispatcher) {
+                                    ConversationContext.requestMessages(session, scope)
+                                },
+                                modelId = session.modelId, reasoningLevel = session.reasoningLevel,
+                                webSearchEnabled = session.webSearchEnabled,
+                                onPartial = { if (requestContext[Job]?.isActive == true) _streamingText.value = it },
+                            )
+                        }
+                        inferenceJob = request
+                        try { request.await() } finally {
+                            if (inferenceJob === request) inferenceJob = null
+                        }
+                    }
+                    val response = try { respond() } catch (error: Exception) {
+                        coroutineContext.ensureActive() // Stop always wins over a simultaneous steer.
+                        if (error is SteeringInterrupt) {
+                            savePartial(sessionId)
+                            _streamingText.value = ""
+                            flushQueued(sessionId)
+                            continue
+                        }
+                        if (error is CancellationException) throw error
+                        val detail = error.message.orEmpty().lowercase()
+                        val contextLimit = detail.contains("context_length_exceeded") || detail.contains("context window") ||
+                            detail.contains("maximum context length") || detail.contains("too many tokens")
+                        if (!contextLimit || contextRecoveryAttempted || _streamingText.value.isNotBlank()) throw error
+                        contextRecoveryAttempted = true
+                        // One recovery attempt per request; completed commands are never replayed.
+                        compactSession(sessionId, scope)
+                        session = findSession(sessionId) ?: throw error
+                        _phase.value = "Thinking…"
+                        // Restart through the same steering-aware path after recovery compaction.
+                        continue
+                    }
                     coroutineContext.ensureActive()
+                    contextRecoveryAttempted = false
+                    updateSession(sessionId) { it.copy(lastInputTokens = response.inputTokens,
+                        usageMessageCount = session.messages.size, usageModelId = session.modelId,
+                        usageAuthScope = scope, usageCheckpointAt = session.contextCheckpoint?.createdAt) }
                     response.reasoningItems.forEach { appendMessage(sessionId, ChatMessage("assistant", it, kind = "reasoning")) }
                     response.searches.forEach { appendMessage(sessionId, ChatMessage("assistant", it, kind = "web_search", toolName = "web_search")) }
                     val responseText = response.text
@@ -416,10 +533,27 @@ class ChatViewModel(private val application: Application, private val runtime: C
                 _streamingText.value = ""
                 _phase.value = ""
                 _isTyping.value = false
-                updateSession(sessionId) { it.copy(turnInProgress = false) }
+                updateSession(sessionId) { it.copy(turnInProgress = false,
+                    lastError = if (compactedWithoutResponse) previousError else it.lastError) }
                 if (_attachmentStatus.value == null) runtime.stopBackground()
             }
         }
+    }
+
+    private suspend fun compactSession(sessionId: String, scope: String) {
+        val session = findSession(sessionId) ?: return
+        _phase.value = "Compacting context… Full chat history stays saved locally."
+        _streamingText.value = ""
+        val context = withContext(contextDispatcher) { ConversationContext.requestMessages(session, scope) }
+        val result = runtime.compact(listOf(SYSTEM_PROMPT) + context,
+            session.modelId, session.reasoningLevel)
+        coroutineContext.ensureActive()
+        require(result.input.isNotEmpty()) { "Compaction returned an empty context; full chat history is unchanged." }
+        val checkpoint = withContext(contextDispatcher) { ConversationContext.checkpoint(session, scope, result) }
+        updateSession(sessionId) { it.copy(contextCheckpoint = checkpoint, lastInputTokens = null,
+            usageMessageCount = 0, usageModelId = null, usageAuthScope = null, usageCheckpointAt = null) }
+        // Checkpoint + transcript are persisted together by the single persistence queue.
+        // If the process dies first, the previous checkpoint/full transcript remains usable.
     }
 
     fun approveCommand(forSession: Boolean = false) {
@@ -452,7 +586,7 @@ class ChatViewModel(private val application: Application, private val runtime: C
     fun hasActiveWork(): Boolean = _isTyping.value || _attachmentStatus.value != null
 
     fun retryResponse() {
-        if (!_isTyping.value && _canRetry.value) _activeSessionId.value?.let(::processAI)
+        if (!_isTyping.value && _canRetry.value) _activeSessionId.value?.let { processAI(it) }
     }
 
     fun continueResponse(): Boolean {
@@ -465,6 +599,7 @@ class ChatViewModel(private val application: Application, private val runtime: C
         val session = sessionState?.let { findSession(it.activeSessionId) } ?: return
         val edited = ConversationEdits.edit(session.messages, messageId, text, attachments) ?: return
         updateSession(session.id) { it.copy(messages = edited, lastError = null, queuedMessages = emptyList(),
+            contextCheckpoint = null, lastInputTokens = null, usageMessageCount = 0,
             title = titleFrom(edited.firstOrNull { message -> message.role == "user" && message.kind == "message" }?.content.orEmpty())) }
         processAI(session.id)
     }
@@ -645,6 +780,9 @@ class ChatViewModel(private val application: Application, private val runtime: C
         _sessionRootAllowed.value = active.id in sessionGrants
         _errorMessage.value = active.lastError
         _canRetry.value = active.lastError != null && !active.turnInProgress
+        _contextStatus.value = active.contextCheckpoint?.let {
+            "Context compacted${if (it.method == "summary") " (summary fallback)" else ""} · full history saved locally"
+        } ?: "Full history saved locally · auto compact on"
     }
 
     private fun schedulePersistence(state: ChatSessionState) {
@@ -694,7 +832,9 @@ class ChatViewModel(private val application: Application, private val runtime: C
                 val model = catalog.firstOrNull { it.id == session.modelId }
                     ?: defaultModelFrom(catalog)
                 if (session.modelId == model.id && session.reasoningLevel in model.supportedReasoningLevels) session
-                else session.copy(modelId = model.id, reasoningLevel = model.defaultReasoningLevel)
+                else session.copy(modelId = model.id, reasoningLevel = model.defaultReasoningLevel,
+                    contextCheckpoint = if (session.modelId == model.id) session.contextCheckpoint else null,
+                    lastInputTokens = if (session.modelId == model.id) session.lastInputTokens else null)
             },
         )
         if (reconciled != state) applyState(reconciled) else publishState(state)
@@ -719,7 +859,7 @@ class ChatViewModel(private val application: Application, private val runtime: C
         sessionState?.sessions?.firstOrNull { it.id == sessionId }
 
     private fun canChangeSession(): Boolean =
-        _isReady.value && !_isTyping.value && _pendingCommand.value == null
+        _isReady.value && !_isTyping.value && !_transferBusy.value && _pendingCommand.value == null
 
     private fun titleFrom(message: String): String = message
         .replace(Regex("\\s+"), " ")

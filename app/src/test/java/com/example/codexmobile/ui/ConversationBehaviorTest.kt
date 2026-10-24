@@ -8,6 +8,9 @@ import com.example.codexmobile.api.CodexToolCall
 import com.example.codexmobile.api.MessageAttachment
 import com.example.codexmobile.data.FALLBACK_CODEX_MODEL_OPTIONS
 import com.example.codexmobile.data.ReasoningLevel
+import com.example.codexmobile.data.CompactedContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
@@ -35,7 +38,7 @@ class ConversationBehaviorTest {
     @Before fun setup() = runBlocking {
         Dispatchers.setMain(Dispatchers.Unconfined)
         runtime = FakeRuntime()
-        controller = ChatViewModel(RuntimeEnvironment.getApplication(), runtime)
+        controller = ChatViewModel(RuntimeEnvironment.getApplication(), runtime, Dispatchers.Unconfined)
         withTimeout(5_000) { controller.isReady.first { it } }
         Unit
     }
@@ -150,16 +153,77 @@ class ConversationBehaviorTest {
         assertEquals(1, output.attachments.size)
     }
 
-    @Test fun `followup without a tool starts the next response after completion`() = runBlocking {
+    @Test fun `followup interrupts inference without waiting for completion`() = runBlocking {
         val gate = CompletableDeferred<CodexResponse>()
         runtime.responseGate = gate
         controller.sendMessage("First")
-        controller.sendMessage("Second")
         runtime.responseGate = null
         runtime.replies += CodexResponse("Second answer")
-        gate.complete(CodexResponse("First answer"))
+        controller.sendMessage("Second")
         withTimeout(5_000) { controller.isTyping.first { !it } }
-        assertEquals(listOf("First", "First answer", "Second", "Second answer"), controller.messages.value.map { it.content })
+        assertEquals(listOf("First", "Second", "Second answer"), controller.messages.value.map { it.content })
+        assertNull(controller.sessions.value.single { it.id == controller.activeSessionId.value }.lastError)
+        gate.complete(CodexResponse("First answer"))
+        assertFalse(controller.messages.value.any { it.content == "First answer" })
+    }
+
+    @Test fun `steering retains partial locally but excludes it from continuation`() = runBlocking {
+        runtime.partial = "Unfinished answer"
+        runtime.responseGate = CompletableDeferred()
+        controller.sendMessage("First")
+        runtime.partial = null
+        runtime.responseGate = null
+        runtime.replies += CodexResponse("Revised answer")
+        controller.sendMessage("Change direction")
+        withTimeout(5_000) { controller.isTyping.first { !it } }
+        assertTrue(controller.messages.value.any { it.kind == "partial" && it.content == "Unfinished answer" })
+        assertFalse(runtime.requests.last().any { it.content == "Unfinished answer" })
+        assertEquals("Change direction", runtime.requests.last().last().content)
+        assertEquals(0, runtime.executions)
+    }
+
+    @Test fun `stop after steering cancels continuation without another request`() = runBlocking {
+        runtime.responseGate = CompletableDeferred()
+        controller.sendMessage("First")
+        runtime.responseGate = CompletableDeferred()
+        controller.sendMessage("Second")
+        assertEquals(2, runtime.requests.size)
+        controller.stopExecution()
+        withTimeout(5_000) { controller.isTyping.first { !it } }
+        assertEquals(2, runtime.requests.size)
+        assertTrue(controller.canRetry.value)
+    }
+
+    @Test fun `repeated steering keeps each user message exactly once and ignores stale callbacks`() = runBlocking {
+        runtime.responseGate = CompletableDeferred()
+        controller.sendMessage("First")
+        val staleCallback = runtime.partialCallbacks.single()
+        runtime.responseGate = CompletableDeferred()
+        controller.sendMessage("Second")
+        staleCallback("Late obsolete text")
+        assertEquals("", controller.streamingText.value)
+        runtime.responseGate = null
+        runtime.replies += CodexResponse("Final")
+        controller.sendMessage("Third")
+        withTimeout(5_000) { controller.isTyping.first { !it } }
+        assertEquals(listOf("First", "Second", "Third"), runtime.requests.last()
+            .filter { it.role == "user" }.map { it.content })
+        assertEquals(listOf("First", "Second", "Third", "Final"), controller.messages.value.map { it.content })
+    }
+
+    @Test fun `steering after a completed command never replays that command`() = runBlocking {
+        runtime.replies += CodexResponse("", listOf(CodexToolCall("once", "exec_command", "{\"cmd\":\"printf done\"}")))
+        controller.sendMessage("Run command")
+        runtime.responseGate = CompletableDeferred()
+        controller.approveCommand()
+        assertEquals(1, runtime.executions)
+        runtime.responseGate = null
+        runtime.replies += CodexResponse("Explanation")
+        controller.sendMessage("Explain instead")
+        withTimeout(5_000) { controller.isTyping.first { !it } }
+        assertEquals(1, runtime.executions)
+        assertEquals(1, runtime.requests.last().count { it.kind == "tool_result" && it.toolCallId == "once" })
+        assertEquals("Explain instead", runtime.requests.last().last().content)
     }
 
     @Test fun `question waits for explicit answer even in full access and resumes with paired result`() {
@@ -248,25 +312,104 @@ class ConversationBehaviorTest {
         assertFalse(controller.isTyping.value)
     }
 
+    @Test fun `automatic compaction preserves all local messages and sends the checkpoint`() {
+        val prompt = "x".repeat(21_000)
+        runtime.replies += CodexResponse("Done")
+        controller.sendMessage(prompt)
+        assertEquals(1, runtime.compactions.size)
+        assertTrue(runtime.requests.single().any { it.kind == "context_window" })
+        assertFalse(runtime.requests.single().any { it.content == prompt })
+        assertEquals(listOf(prompt, "Done"), controller.messages.value.map { it.content })
+        assertNotNull(controller.sessions.value.single().contextCheckpoint)
+        assertEquals(0, runtime.executions)
+    }
+
+    @Test fun `stopping compaction keeps the transcript and previous context intact`() = runBlocking {
+        runtime.compactGate = CompletableDeferred()
+        val prompt = "x".repeat(21_000)
+        controller.sendMessage(prompt)
+        assertTrue(controller.phase.value.contains("Compacting"))
+        controller.stopExecution()
+        withTimeout(5_000) { controller.isTyping.first { !it } }
+        assertEquals(listOf(prompt), controller.messages.value.map { it.content })
+        assertNull(controller.sessions.value.single().contextCheckpoint)
+        assertTrue(runtime.requests.isEmpty())
+        assertEquals(0, runtime.executions)
+    }
+
+    @Test fun `followup received during compaction reaches the next request boundary`() = runBlocking {
+        val gate = CompletableDeferred<CompactedContext>()
+        runtime.compactGate = gate
+        controller.sendMessage("x".repeat(21_000))
+        controller.sendMessage("Also check permissions")
+        runtime.compactGate = null
+        runtime.replies += CodexResponse("First reply")
+        runtime.replies += CodexResponse("Followup reply")
+        gate.complete(runtime.compacted)
+        withTimeout(5_000) { controller.isTyping.first { !it } }
+        assertEquals("Also check permissions", runtime.requests.last().last().content)
+        assertTrue(controller.queuedMessages.value.isEmpty())
+        assertEquals(0, runtime.executions)
+    }
+
+    @Test fun `compaction failure does not replace transcript and is retryable`() {
+        runtime.compactFailure = IllegalStateException("Network unavailable")
+        val prompt = "x".repeat(21_000)
+        controller.sendMessage(prompt)
+        assertEquals(listOf(prompt), controller.messages.value.map { it.content })
+        assertNull(controller.sessions.value.single().contextCheckpoint)
+        assertTrue(controller.canRetry.value)
+        assertEquals(0, runtime.executions)
+    }
+
+    @Test fun `manual compaction preserves continue availability and editing discards stale checkpoint`() {
+        runtime.replies += CodexResponse("", listOf(CodexToolCall("call_1", "exec_command", "{\"cmd\":\"id\"}")))
+        controller.sendMessage("Inspect")
+        controller.stopExecution()
+        val before = controller.messages.value
+        controller.compactNow()
+        assertEquals(before, controller.messages.value)
+        assertTrue(controller.canRetry.value)
+        assertNotNull(controller.sessions.value.single().contextCheckpoint)
+        runtime.replies += CodexResponse("Updated")
+        controller.editMessage(before.first().id, "New task", emptyList())
+        assertNull(controller.sessions.value.single().contextCheckpoint)
+        assertFalse(runtime.requests.last().any { it.kind == "context_window" })
+        assertEquals(0, runtime.executions)
+    }
+
     private class FakeRuntime : ChatRuntime {
+        val compactions = mutableListOf<List<ChatMessage>>()
+        var compactGate: CompletableDeferred<CompactedContext>? = null
+        var compactFailure: Exception? = null
+        val compacted = CompactedContext(Json.parseToJsonElement("""[{"type":"compaction","encrypted_content":"state"}]""") as JsonArray)
+        override suspend fun compact(messages: List<ChatMessage>, modelId: String, reasoningLevel: ReasoningLevel): CompactedContext {
+            compactions += messages
+            compactFailure?.let { throw it }
+            return compactGate?.await() ?: compacted
+        }
         val replies = ArrayDeque<CodexResponse>()
         val requests = mutableListOf<List<ChatMessage>>()
+        val partialCallbacks = mutableListOf<(String) -> Unit>()
         val webSearchFlags = mutableListOf<Boolean>()
         var executions = 0
         var captures = 0
         var failure: Exception? = null
         var responseGate: CompletableDeferred<CodexResponse>? = null
+        var partial: String? = null
         var root: suspend () -> ShellCommandResult = { ShellCommandResult(0, "ok", "") }
         override suspend fun respond(messages: List<ChatMessage>, modelId: String, reasoningLevel: ReasoningLevel,
             webSearchEnabled: Boolean, onPartial: (String) -> Unit): CodexResponse {
             requests += messages
+            partialCallbacks += onPartial
             webSearchFlags += webSearchEnabled
+            partial?.let(onPartial)
             failure?.let { throw it }
             return responseGate?.await() ?: replies.removeFirst()
         }
         override suspend fun execute(command: String): ShellCommandResult { executions++; return root() }
         override suspend fun capture(): List<MessageAttachment> { captures++; return listOf(MessageAttachment(name = "Screen", mimeType = "image/jpeg", localPath = "fake", sizeBytes = 1)) }
-        override suspend fun models() = FALLBACK_CODEX_MODEL_OPTIONS
+        override suspend fun models() = FALLBACK_CODEX_MODEL_OPTIONS.map { it.copy(contextWindow = 8_192) }
         override fun startBackground() {}
         override fun stopBackground() {}
     }

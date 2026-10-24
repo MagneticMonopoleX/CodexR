@@ -16,6 +16,8 @@ data class ChatMessage(
     val toolCallId: String? = null,
     val toolName: String? = null,
     val toolArguments: String? = null,
+    // Imported provider reasoning can be retained locally without replaying account-bound state.
+    val includeInContext: Boolean = true,
 )
 
 data class CodexToolCall(
@@ -29,6 +31,7 @@ data class CodexResponse(
     val toolCalls: List<CodexToolCall> = emptyList(),
     val reasoningItems: List<String> = emptyList(),
     val searches: List<String> = emptyList(),
+    val inputTokens: Long? = null,
 )
 
 @Serializable

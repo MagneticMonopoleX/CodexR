@@ -11,9 +11,13 @@ import com.example.codexmobile.api.CodexResponse
 import com.example.codexmobile.api.MessageAttachment
 import com.example.codexmobile.data.CodexModelOption
 import com.example.codexmobile.data.ReasoningLevel
+import com.example.codexmobile.data.CompactedContext
 
 /** The side effects of a turn, separated so conversation transitions can be tested offline. */
 interface ChatRuntime {
+    suspend fun contextScope(): String = "local-test"
+    suspend fun compact(messages: List<ChatMessage>, modelId: String, reasoningLevel: ReasoningLevel): CompactedContext =
+        error("Compaction is unavailable")
     suspend fun respond(messages: List<ChatMessage>, modelId: String, reasoningLevel: ReasoningLevel,
         webSearchEnabled: Boolean, onPartial: (String) -> Unit): CodexResponse
     suspend fun execute(command: String): ShellCommandResult
@@ -24,6 +28,9 @@ interface ChatRuntime {
 }
 
 class AndroidChatRuntime(private val application: Application) : ChatRuntime {
+    override suspend fun contextScope() = AIClient.contextScope()
+    override suspend fun compact(messages: List<ChatMessage>, modelId: String, reasoningLevel: ReasoningLevel) =
+        AIClient.compactConversation(messages, modelId, reasoningLevel)
     override suspend fun respond(messages: List<ChatMessage>, modelId: String, reasoningLevel: ReasoningLevel,
         webSearchEnabled: Boolean, onPartial: (String) -> Unit) =
         AIClient.generateResponse(messages, modelId, reasoningLevel, onPartial, webSearchEnabled)
